@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MAAT Lab Bridge Skill</title>
+</head>
+<body>
+    <script>
+        // ── Configuration ────────────────────────────────────────────────
+        // The Mac's LAN IP. Change this if your Mac's IP changes.
+        const BRIDGE_HOST = "192.168.4.36";
+        const BRIDGE_PORT = 9876;
+        const BRIDGE_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}`;
+
+        // ── Main entry point ────────────────────────────────────────────
+        window['ai_edge_gallery_get_result'] = async (data) => {
+            try {
+                const params = JSON.parse(data);
+                const action = params.action || "status";
+
+                let result;
+                switch (action) {
+                    case "status":
+                        result = await fetchStatus();
+                        break;
+                    case "episodic":
+                        result = await fetchEpisodic();
+                        break;
+                    case "semantic":
+                        result = await fetchSemantic(params.domain);
+                        break;
+                    case "trading":
+                        result = await fetchTrading();
+                        break;
+                    case "search":
+                        if (!params.query) {
+                            return JSON.stringify({ error: "Missing 'query' field for search action" });
+                        }
+                        result = await fetchSearch(params.query);
+                        break;
+                    case "artifacts":
+                        result = await fetchArtifacts();
+                        break;
+                    default:
+                        return JSON.stringify({ error: `Unknown action: ${action}` });
+                }
+
+                return JSON.stringify({
+                    result: formatResult(action, result, params)
+                });
+            } catch (e) {
+                console.error("MAAT Lab Bridge error:", e);
+                return JSON.stringify({
+                    error: `Failed: ${e.message}`
+                });
+            }
+        };
+
+        // ── API calls ───────────────────────────────────────────────────
+
+        async function fetchStatus() {
+            const res = await fetch(`${BRIDGE_URL}/status`);
+            return await res.json();
+        }
+
+        async function fetchEpisodic() {
+            const res = await fetch(`${BRIDGE_URL}/episodic`);
+            return await res.json();
+        }
+
+        async function fetchSemantic(domain) {
+            let url = `${BRIDGE_URL}/semantic`;
+            if (domain) url += `/${encodeURIComponent(domain)}`;
+            const res = await fetch(url);
+            return await res.json();
+        }
+
+        async function fetchTrading() {
+            const res = await fetch(`${BRIDGE_URL}/trading`);
+            return await res.json();
+        }
+
+        async function fetchSearch(query) {
+            const res = await fetch(`${BRIDGE_URL}/search?q=${encodeURIComponent(query)}`);
+            return await res.json();
+        }
+
+        async function fetchArtifacts() {
+            const res = await fetch(`${BRIDGE_URL}/artifacts`);
+            return await res.json();
+        }
+
+        // ── Formatting ──────────────────────────────────────────────────
+
+        function formatResult(action, data, params) {
+            if (data.error) return `⚠️ Lab bridge error: ${data.error}`;
+
+            switch (action) {
+                case "status":
+                    return `🔌 **MAAT Lab Bridge**\nStatus: ${data.status}\nHost: ${data.host}:${data.port}\nVersion: ${data.version}\nTimestamp: ${data.timestamp}`;
+
+                case "episodic": {
+                    if (!data.memories || data.memories.length === 0)
+                        return "📭 No episodic memories found.";
+                    let lines = [`📖 **Recent Episodic Memories** (${data.count})`];
+                    data.memories.forEach(m => {
+                        lines.push(`\n📄 **${m.filename}**`);
+                        lines.push(m.preview.substring(0, 400));
+                    });
+                    return lines.join("\n");
+                }
+
+                case "semantic": {
+                    if (!data.memories || data.memories.length === 0)
+                        return "📭 No semantic memories found.";
+                    let label = params.domain ? ` (domain: ${params.domain})` : "";
+                    let lines = [`🧠 **Semantic Knowledge${label}** (${data.count})`];
+                    data.memories.forEach(m => {
+                        lines.push(`\n📄 **${m.filename}**`);
+                        lines.push(m.preview.substring(0, 300));
+                    });
+                    return lines.join("\n");
+                }
+
+                case "trading":
+                    let t = [`📊 **Trading System Status**`];
+                    t.push(`System: ${data.system}`);
+                    t.push(`Account: ${data.account_type}`);
+                    if (data.last_scan) t.push(`Last Scan: ${data.last_scan}`);
+                    if (data.equity) t.push(`Equity: $${data.equity}`);
+                    if (data.last_scan_preview) {
+                        t.push(`\n📋 **Last Scan Preview:**`);
+                        t.push(data.last_scan_preview.substring(0, 500));
+                    }
+                    return t.join("\n");
+
+                case "search": {
+                    if (!data.results || data.results.length === 0)
+                        return `🔍 No results for "${data.query}".`;
+                    let lines = [`🔍 **Search Results** for "${data.query}" (${data.count})`];
+                    data.results.forEach(r => {
+                        lines.push(`\n📄 **${r.filename}** (${r.source})`);
+                        lines.push(r.snippet.substring(0, 300));
+                    });
+                    return lines.join("\n");
+                }
+
+                case "artifacts": {
+                    const artifacts = data.artifacts || [];
+                    if (artifacts.length === 0)
+                        return "📦 No artifacts found (lab brain may be unavailable).";
+                    let lines = [`📦 **Lab Artifacts** (${artifacts.length})`];
+                    artifacts.forEach(a => {
+                        lines.push(`\n• **${a.title || a.uri}**`);
+                        if (a.type) lines.push(`  Type: ${a.type}`);
+                        if (a.timestamp) lines.push(`  When: ${a.timestamp}`);
+                    });
+                    return lines.join("\n");
+                }
+
+                default:
+                    return JSON.stringify(data, null, 2);
+            }
+        }
+    </script>
+</body>
+</html>
