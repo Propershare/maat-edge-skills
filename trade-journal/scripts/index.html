@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trade Journal Skill</title>
+</head>
+<body>
+    <script>
+        // ── Local Storage Key ────────────────────────────────────────────
+        const STORAGE_KEY = "maat_trade_journal";
+
+        window['ai_edge_gallery_get_result'] = async (data) => {
+            try {
+                const params = JSON.parse(data);
+                const action = params.action || "help";
+
+                switch (action) {
+                    case "log":
+                        return JSON.stringify({ result: logTrade(params) });
+                    case "list":
+                        return JSON.stringify({ result: listTrades(params.limit || 10) });
+                    case "stats":
+                        return JSON.stringify({ result: showStats() });
+                    case "clear":
+                        if (params.confirm === true) {
+                            localStorage.removeItem(STORAGE_KEY);
+                            return JSON.stringify({ result: "🗑️ All trade journal data cleared." });
+                        }
+                        return JSON.stringify({ result: "⚠️ To clear all data, call with confirm: true" });
+                    case "help":
+                        return JSON.stringify({ result: formatHelp() });
+                    default:
+                        return JSON.stringify({ error: `Unknown action: ${action}` });
+                }
+            } catch (e) {
+                console.error("Trade Journal error:", e);
+                return JSON.stringify({ error: `Failed: ${e.message}` });
+            }
+        };
+
+        // ── Storage ─────────────────────────────────────────────────────
+
+        function getTrades() {
+            try {
+                return JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
+            } catch {
+                return [];
+            }
+        }
+
+        function saveTrades(trades) {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(trades));
+        }
+
+        // ── Actions ─────────────────────────────────────────────────────
+
+        function logTrade(params) {
+            const required = ["symbol", "direction", "entry", "exit", "quantity", "setup"];
+            const missing = required.filter(f => params[f] === undefined || params[f] === null);
+            if (missing.length > 0) {
+                return `❌ Missing required fields: ${missing.join(", ")}`;
+            }
+
+            const direction = params.direction.toLowerCase();
+            if (direction !== "long" && direction !== "short") {
+                return "❌ Direction must be 'long' or 'short'";
+            }
+
+            const entry = parseFloat(params.entry);
+            const exit = parseFloat(params.exit);
+            const quantity = parseFloat(params.quantity);
+
+            // Calculate P&L
+            const priceDiff = direction === "long" ? exit - entry : entry - exit;
+            const pnl = (priceDiff * quantity).toFixed(2);
+            const win = priceDiff > 0;
+            const rr = priceDiff !== 0 ? Math.abs(priceDiff / (priceDiff > 0 ? 1 : 1)).toFixed(2) : "0";
+
+            const trade = {
+                id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+                timestamp: new Date().toISOString(),
+                symbol: params.symbol.toUpperCase(),
+                direction,
+                entry,
+                exit,
+                quantity,
+                setup: params.setup,
+                notes: params.notes || "",
+                pnl: parseFloat(pnl),
+                win,
+                rr: parseFloat(rr)
+            };
+
+            const trades = getTrades();
+            trades.push(trade);
+            saveTrades(trades);
+
+            let lines = [`✅ **Trade Logged** — ${trade.symbol} ${direction.toUpperCase()}`];
+            lines.push(`   Entry: $${entry} → Exit: $${exit}`);
+            lines.push(`   Qty: ${quantity} | P&L: ${win ? "✅ +" : "❌ "}$${Math.abs(trade.pnl)}`);
+            lines.push(`   Setup: ${params.setup}`);
+            if (params.notes) lines.push(`   Notes: ${params.notes}`);
+            lines.push(`   Total trades: ${trades.length} | ID: ${trade.id.slice(0, 8)}`);
+            return lines.join("\n");
+        }
+
+        function listTrades(limit) {
+            const trades = getTrades();
+            if (trades.length === 0) {
+                return "📭 No trades logged yet. Use the 'log' action to record your first trade.";
+            }
+
+            const recent = trades.slice(-limit).reverse();
+            let lines = [`📋 **Recent Trades** (${trades.length} total, showing ${recent.length})`];
+            
+            recent.forEach((t, i) => {
+                const dir = t.direction === "long" ? "🟢" : "🔴";
+                const result = t.win ? "✅" : "❌";
+                const date = new Date(t.timestamp).toLocaleDateString();
+                lines.push(`\n${i+1}. ${dir} ${t.symbol} ${result} $${t.pnl.toFixed(2)}`);
+                lines.push(`   ${t.setup} | Entry: $${t.entry} → Exit: $${t.exit}`);
+                lines.push(`   ${date} | Qty: ${t.quantity}`);
+            });
+
+            return lines.join("\n");
+        }
+
+        function showStats() {
+            const trades = getTrades();
+            if (trades.length === 0) {
+                return "📭 No trades yet. Start logging to see stats!";
+            }
+
+            const wins = trades.filter(t => t.win);
+            const losses = trades.filter(t => !t.win);
+            const winRate = ((wins.length / trades.length) * 100).toFixed(1);
+            const totalPnl = trades.reduce((sum, t) => sum + t.pnl, 0);
+            const avgWin = wins.length > 0 ? (wins.reduce((s, t) => s + t.pnl, 0) / wins.length).toFixed(2) : 0;
+            const avgLoss = losses.length > 0 ? (losses.reduce((s, t) => s + t.pnl, 0) / losses.length).toFixed(2) : 0;
+            const bestTrade = trades.reduce((best, t) => t.pnl > best.pnl ? t : best, trades[0]);
+            const worstTrade = trades.reduce((worst, t) => t.pnl < worst.pnl ? t : worst, trades[0]);
+
+            // Setup breakdown
+            const setups = {};
+            trades.forEach(t => {
+                setups[t.setup] = (setups[t.setup] || 0) + 1;
+            });
+
+            let lines = [`📊 **Trade Journal Stats**`];
+            lines.push(`\n📈 **Overview**`);
+            lines.push(`   Total Trades: ${trades.length}`);
+            lines.push(`   Wins: ${wins.length} | Losses: ${losses.length}`);
+            lines.push(`   Win Rate: ${winRate}%`);
+            lines.push(`   Total P&L: ${totalPnl >= 0 ? "✅ +" : "❌ "}$${Math.abs(totalPnl).toFixed(2)}`);
+            lines.push(`\n💰 **Averages**`);
+            lines.push(`   Avg Win: +$${avgWin}`);
+            lines.push(`   Avg Loss: -$${Math.abs(parseFloat(avgLoss))}`);
+            lines.push(`\n🏆 **Best Trade:** ${bestTrade.symbol} ${bestTrade.direction} +$${bestTrade.pnl.toFixed(2)}`);
+            lines.push(`💀 **Worst Trade:** ${worstTrade.symbol} ${worstTrade.direction} -$${Math.abs(worstTrade.pnl).toFixed(2)}`);
+            
+            lines.push(`\n📂 **By Setup**`);
+            Object.entries(setups).sort((a, b) => b[1] - a[1]).forEach(([setup, count]) => {
+                const pct = ((count / trades.length) * 100).toFixed(0);
+                lines.push(`   ${setup}: ${count} (${pct}%)`);
+            });
+
+            return lines.join("\n");
+        }
+
+        function formatHelp() {
+            return `📖 **Trade Journal Help**
+
+**Actions:**
+• \`log\` — Record a trade (requires: symbol, direction, entry, exit, quantity, setup)
+• \`list\` — View recent trades
+• \`stats\` — Performance summary
+• \`clear\` — Delete all data
+
+**Example:**
+"Log a trade: ES=F long, entry 7448, exit 7500, qty 2, FVG sweep setup"
+
+All data stays on your device. Nothing is sent anywhere.`;
+        }
+    </script>
+</body>
+</html>

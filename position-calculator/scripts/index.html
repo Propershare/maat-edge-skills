@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Position Calculator Skill</title>
+</head>
+<body>
+    <script>
+        window['ai_edge_gallery_get_result'] = async (data) => {
+            try {
+                const params = JSON.parse(data);
+                const action = params.action || "help";
+
+                switch (action) {
+                    case "calculate":
+                        return JSON.stringify({ result: calculatePosition(params) });
+                    case "targets":
+                        return JSON.stringify({ result: calculateTargets(params) });
+                    case "help":
+                        return JSON.stringify({ result: formatHelp() });
+                    default:
+                        return JSON.stringify({ error: `Unknown action: ${action}` });
+                }
+            } catch (e) {
+                console.error("Position Calculator error:", e);
+                return JSON.stringify({ error: `Failed: ${e.message}` });
+            }
+        };
+
+        function calculatePosition(params) {
+            const required = ["account", "risk_pct", "entry", "stop", "direction"];
+            const missing = required.filter(f => params[f] === undefined || params[f] === null);
+            if (missing.length > 0) {
+                return `❌ Missing: ${missing.join(", ")}`;
+            }
+
+            const account = parseFloat(params.account);
+            const riskPct = parseFloat(params.risk_pct);
+            const entry = parseFloat(params.entry);
+            const stop = parseFloat(params.stop);
+            const direction = params.direction.toLowerCase();
+
+            if (direction !== "long" && direction !== "short") {
+                return "❌ Direction must be 'long' or 'short'";
+            }
+
+            const riskAmount = account * (riskPct / 100);
+            const stopDistance = Math.abs(entry - stop);
+            const positionSize = stopDistance > 0 ? riskAmount / stopDistance : 0;
+            const shares = Math.floor(positionSize);
+
+            // R:R targets
+            const r1 = direction === "long" ? entry + stopDistance : entry - stopDistance;
+            const r2 = direction === "long" ? entry + (stopDistance * 2) : entry - (stopDistance * 2);
+            const r3 = direction === "long" ? entry + (stopDistance * 3) : entry - (stopDistance * 3);
+
+            let lines = [`📐 **Position Size Calculator**`];
+            lines.push(`\n📊 **Input**`);
+            lines.push(`   Account: $${account.toLocaleString()}`);
+            lines.push(`   Risk: ${riskPct}% = $${riskAmount.toFixed(2)}`);
+            lines.push(`   ${direction.toUpperCase()} | Entry: $${entry} | Stop: $${stop}`);
+            lines.push(`   Stop Distance: $${stopDistance.toFixed(2)}`);
+            lines.push(`\n📏 **Position**`);
+            lines.push(`   Size: ${shares} shares/contracts`);
+            lines.push(`   Notional: $${(shares * entry).toFixed(2)}`);
+            lines.push(`   Risk: $${(shares * stopDistance).toFixed(2)}`);
+            lines.push(`\n🎯 **R:R Targets**`);
+            lines.push(`   1R: $${r1.toFixed(2)} ($${(shares * stopDistance).toFixed(2)})`);
+            lines.push(`   2R: $${r2.toFixed(2)} ($${(shares * stopDistance * 2).toFixed(2)})`);
+            lines.push(`   3R: $${r3.toFixed(2)} ($${(shares * stopDistance * 3).toFixed(2)})`);
+
+            return lines.join("\n");
+        }
+
+        function calculateTargets(params) {
+            const required = ["entry", "stop", "direction"];
+            const missing = required.filter(f => params[f] === undefined || params[f] === null);
+            if (missing.length > 0) {
+                return `❌ Missing: ${missing.join(", ")}`;
+            }
+
+            const entry = parseFloat(params.entry);
+            const stop = parseFloat(params.stop);
+            const direction = params.direction.toLowerCase();
+            const targetR = params.target_r || 3;
+
+            if (direction !== "long" && direction !== "short") {
+                return "❌ Direction must be 'long' or 'short'";
+            }
+
+            const stopDistance = Math.abs(entry - stop);
+            let lines = [`🎯 **R:R Targets** for ${direction.toUpperCase()} $${entry}`];
+            lines.push(`   Stop: $${stop} (distance: $${stopDistance.toFixed(2)})`);
+            lines.push(``);
+
+            for (let r = 1; r <= targetR; r++) {
+                const target = direction === "long" 
+                    ? entry + (stopDistance * r) 
+                    : entry - (stopDistance * r);
+                lines.push(`   ${r}R: $${target.toFixed(2)}`);
+            }
+
+            return lines.join("\n");
+        }
+
+        function formatHelp() {
+            return `📖 **Position Calculator Help**
+
+**Actions:**
+• \`calculate\` — Full position size calc
+  Required: account, risk_pct, entry, stop, direction
+• \`targets\` — Just R:R targets
+  Required: entry, stop, direction
+
+**Example:**
+"Calculate position: $80k account, 1% risk, long ES=F at 7448, stop at 7420"
+
+**Easy E's 1% Rule:**
+Risk no more than 1% of account per trade. For $80k = $800 max risk.`;
+        }
+    </script>
+</body>
+</html>

@@ -1,14 +1,19 @@
 # MAAT Edge Skills
 
-Agent Skills for **Google AI Edge Gallery** — query your MAAT lab from your iPhone.
+Agent Skills for **Google AI Edge Gallery** — run on your iPhone with Gemma 4, fully offline.
 
 ## Skills
 
-| Skill | Description | Type |
-|-------|-------------|------|
-| [maat-lab-bridge](maat-lab-bridge/) | Query lab status, trading system, episodic/semantic memories, search | JS |
+| Skill | Description | Offline |
+|-------|-------------|---------|
+| [maat-lab-bridge](maat-lab-bridge/) | Query your MAAT lab: trading status, memories, search | ✅ (LAN) |
+| [fvg-scanner](fvg-scanner/) | Analyze OHLC data for FVGs, 50-yard line, sweeps, retests | ✅ |
+| [trade-journal](trade-journal/) | Log trades, track win rate, P&L, performance stats | ✅ |
+| [position-calculator](position-calculator/) | Position size, risk amount, R:R targets (Easy E 1% rule) | ✅ |
+| [session-timer](session-timer/) | Track London, NY, Asia, Sydney sessions + overlaps | ✅ |
+| [trade-scratchpad](trade-scratchpad/) | Save trade ideas, chart observations, market notes | ✅ |
 
-## Setup
+## Quick Start
 
 ### 1. Start the bridge on your Mac
 
@@ -16,49 +21,61 @@ Agent Skills for **Google AI Edge Gallery** — query your MAAT lab from your iP
 python3 /Users/ps/clawd/edge-bridge/bridge_server.py
 ```
 
-The bridge runs on `http://192.168.4.36:9876` and exposes:
-- `/status` — Bridge health
-- `/episodic` — Recent episodic memories
-- `/semantic` — Semantic knowledge
-- `/trading` — Trading system status
-- `/search?q=...` — Search across all lab memory
-- `/artifacts` — Lab brain artifacts
+### 2. Load skills on iPhone
 
-### 2. Load the skill on iPhone
+Open **AI Edge Gallery** → Agent Skills → **+** → **Load skill from URL**
 
-1. Open **AI Edge Gallery** on iPhone
-2. Go to **Agent Skills** tile
-3. Tap **+** → **Load skill from URL**
-4. Enter: `https://ps.github.io/maat-edge-skills/maat-lab-bridge/`
-5. The skill will query your Mac's bridge server over LAN
+| Skill | URL |
+|-------|-----|
+| Lab Bridge | `https://2bbf4613325340.lhr.life/skill/maat-lab-bridge/` |
+| FVG Scanner | `https://2bbf4613325340.lhr.life/skill/fvg-scanner/` |
+| Trade Journal | `https://2bbf4613325340.lhr.life/skill/trade-journal/` |
+| Position Calc | `https://2bbf4613325340.lhr.life/skill/position-calculator/` |
+| Session Timer | `https://2bbf4613325340.lhr.life/skill/session-timer/` |
+| Scratchpad | `https://2bbf4613325340.lhr.life/skill/trade-scratchpad/` |
 
-### 3. Auto-start the bridge (optional)
+### 3. Try them
 
-Add to your crontab or launchd to start on boot:
-
-```bash
-@reboot python3 /Users/ps/clawd/edge-bridge/bridge_server.py &
-```
+- *"What's the trading system status?"* (lab-bridge)
+- *"Analyze these candles for FVGs: [high: 100.5, low: 99.2, ...]"* (fvg-scanner)
+- *"Log a trade: ES=F long, entry 7448, exit 7500, qty 2, FVG sweep"* (trade-journal)
+- *"Calculate position: $80k account, 1% risk, long at 7448, stop at 7420"* (position-calculator)
+- *"What sessions are active now?"* (session-timer)
+- *"Save idea: ES=F bearish FVG sweep at 7450, confidence 7"* (scratchpad)
 
 ## Architecture
 
 ```
 iPhone (AI Edge Gallery)          Mac (192.168.4.36)           Lab
 ┌─────────────────────┐    HTTP    ┌──────────────────┐    ┌──────────────┐
-│ Gemma 4 + Skill     │ ────────→ │ bridge_server.py │───→│ maat-memory  │
-│ maat-lab-bridge     │ ←──────── │ :9876            │    │ (git files)  │
+│ Gemma 4 + Skills    │ ────────→ │ bridge_server.py │───→│ maat-memory  │
+│ (6 trading skills)  │ ←──────── │ :9876 / tunnel    │    │ (git files)  │
 └─────────────────────┘    JSON    └──────────────────┘    └──────────────┘
-                                          │
-                                          └──→ Lab Brain Postgres (192.168.4.21)
 ```
 
-## Development
-
-Each skill follows the standard AI Edge Gallery structure:
+## Structure
 
 ```
-skill-name/
-├── SKILL.md          # Metadata + LLM instructions
-└── scripts/
-    └── index.html    # JS entry point (ai_edge_gallery_get_result)
+edge-bridge/
+├── bridge_server.py          # HTTP API + static file server
+├── .nojekyll                 # For GitHub Pages
+├── README.md
+├── maat-lab-bridge/          # Lab query skill
+│   ├── SKILL.md
+│   └── scripts/index.html
+├── fvg-scanner/              # FVG pattern detection
+│   ├── SKILL.md
+│   └── scripts/index.html
+├── trade-journal/            # Trade logging + stats
+│   ├── SKILL.md
+│   └── scripts/index.html
+├── position-calculator/      # Position sizing + R:R
+│   ├── SKILL.md
+│   └── scripts/index.html
+├── session-timer/            # Trading session tracker
+│   ├── SKILL.md
+│   └── scripts/index.html
+└── trade-scratchpad/         # Trade idea scratchpad
+    ├── SKILL.md
+    └── scripts/index.html
 ```

@@ -8,10 +8,8 @@
 <body>
     <script>
         // ── Configuration ────────────────────────────────────────────────
-        // The Mac's LAN IP. Change this if your Mac's IP changes.
-        const BRIDGE_HOST = "192.168.4.36";
-        const BRIDGE_PORT = 9876;
-        const BRIDGE_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}`;
+        // Use the same origin the skill was loaded from (works with tunnel or LAN)
+        const BRIDGE_URL = window.location.origin;
 
         // ── Main entry point ────────────────────────────────────────────
         window['ai_edge_gallery_get_result'] = async (data) => {

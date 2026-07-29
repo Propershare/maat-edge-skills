@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FVG Scanner Skill</title>
+</head>
+<body>
+    <script>
+        window['ai_edge_gallery_get_result'] = async (data) => {
+            try {
+                const params = JSON.parse(data);
+                const action = params.action || "help";
+
+                switch (action) {
+                    case "analyze":
+                        if (!params.candles || !Array.isArray(params.candles) || params.candles.length < 4) {
+                            return JSON.stringify({ error: "Need at least 4 candles for analysis. Pass an array of {high, low, open, close, time} objects." });
+                        }
+                        const result = analyzeFVGs(params.candles);
+                        return JSON.stringify({ result: formatAnalysis(result) });
+                    case "help":
+                        return JSON.stringify({ result: formatHelp() });
+                    default:
+                        return JSON.stringify({ error: `Unknown action: ${action}` });
+                }
+            } catch (e) {
+                console.error("FVG Scanner error:", e);
+                return JSON.stringify({ error: `Failed: ${e.message}` });
+            }
+        };
+
+        // ── FVG Detection Engine ────────────────────────────────────────
+
+        function analyzeFVGs(candles) {
+            const fvgs = [];
+            const sweeps = [];
+            const retests = [];
+
+            // Detect FVGs between consecutive candles
+            for (let i = 0; i < candles.length - 1; i++) {
+                const c1 = candles[i];
+                const c2 = candles[i + 1];
+
+                // Bullish FVG: c1's high < c2's low (gap up)
+                if (c1.high < c2.low) {
+                    fvgs.push({
+                        type: "bullish",
+                        fvg_high: c2.low,
+                        fvg_low: c1.high,
+                        midpoint: ((c2.low + c1.high) / 2).toFixed(2),
+                        size: (c2.low - c1.high).toFixed(2),
+                        start_index: i,
+                        time: c2.time || `candle ${i+1}`
+                    });
+                }
+
+                // Bearish FVG: c1's low > c2's high (gap down)
+                if (c1.low > c2.high) {
+                    fvgs.push({
+                        type: "bearish",
+                        fvg_high: c1.low,
+                        fvg_low: c2.high,
+                        midpoint: ((c1.low + c2.high) / 2).toFixed(2),
+                        size: (c1.low - c2.high).toFixed(2),
+                        start_index: i,
+                        time: c2.time || `candle ${i+1}`
+                    });
+                }
+            }
+
+            // Detect sweeps: price moves below a bullish FVG low or above a bearish FVG high
+            for (const fvg of fvgs) {
+                for (let i = fvg.start_index + 2; i < candles.length; i++) {
+                    const c = candles[i];
+                    if (fvg.type === "bullish") {
+                        // Sweep below FVG low
+                        if (c.low <= parseFloat(fvg.fvg_low)) {
+                            sweeps.push({
+                                fvg_type: "bullish",
+                                sweep_level: c.low,
+                                fvg_low: fvg.fvg_low,
+                                time: c.time || `candle ${i+1}`,
+                                candle_index: i
+                            });
+                            break;
+                        }
+                    } else {
+                        // Sweep above FVG high
+                        if (c.high >= parseFloat(fvg.fvg_high)) {
+                            sweeps.push({
+                                fvg_type: "bearish",
+                                sweep_level: c.high,
+                                fvg_high: fvg.fvg_high,
+                                time: c.time || `candle ${i+1}`,
+                                candle_index: i
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Detect retests: after a sweep, price returns to the FVG midpoint
+            for (const sweep of sweeps) {
+                const fvg = fvgs.find(f => 
+                    (sweep.fvg_type === "bullish" && f.type === "bullish") ||
+                    (sweep.fvg_type === "bearish" && f.type === "bearish")
+                );
+                if (!fvg) continue;
+
+                for (let i = sweep.candle_index + 1; i < candles.length; i++) {
+                    const c = candles[i];
+                    const mid = parseFloat(fvg.midpoint);
+                    const range = parseFloat(fvg.size) * 0.1; // 10% of FVG size as tolerance
+                    
+                    if (c.low <= mid + range && c.high >= mid - range) {
+                        retests.push({
+                            fvg_type: fvg.type,
+                            retest_price: mid,
+                            time: c.time || `candle ${i+1}`,
+                            candle_index: i,
+                            confirmed: c.close > mid ? (fvg.type === "bullish" ? "✅ bullish" : "❌ bearish fail") :
+                                       c.close < mid ? (fvg.type === "bearish" ? "✅ bearish" : "❌ bullish fail") :
+                                       "⏳ neutral"
+                        });
+                        break;
+                    }
+                }
+            }
+
+            // Determine bias
+            let bias = "neutral";
+            let reasons = [];
+            if (fvgs.length > 0) {
+                const bullishCount = fvgs.filter(f => f.type === "bullish").length;
+                const bearishCount = fvgs.filter(f => f.type === "bearish").length;
+                if (bullishCount > bearishCount) bias = "bullish";
+                else if (bearishCount > bullishCount) bias = "bearish";
+                
+                reasons.push(`${fvgs.length} FVG(s) found (${bullishCount} bullish, ${bearishCount} bearish)`);
+            }
+            if (sweeps.length > 0) reasons.push(`${sweeps.length} sweep(s) detected`);
+            if (retests.length > 0) reasons.push(`${retests.length} retest(s) confirmed`);
+
+            return { fvgs, sweeps, retests, bias, reasons };
+        }
+
+        // ── Formatting ──────────────────────────────────────────────────
+
+        function formatAnalysis(result) {
+            let lines = [`📊 **FVG Analysis** — Bias: ${result.bias.toUpperCase()}`];
+            lines.push(`   ${result.reasons.join(" | ")}`);
+
+            if (result.fvgs.length > 0) {
+                lines.push(`\n🔲 **Fair Value Gaps**`);
+                result.fvgs.forEach((f, i) => {
+                    const dir = f.type === "bullish" ? "🟢 Bullish" : "🔴 Bearish";
+                    lines.push(`\n${i+1}. ${dir} @ ${f.time}`);
+                    lines.push(`   FVG: ${f.fvg_low} → ${f.fvg_high}`);
+                    lines.push(`   🎯 50-Yard Line: ${f.midpoint}`);
+                    lines.push(`   Size: ${f.size}`);
+                });
+            }
+
+            if (result.sweeps.length > 0) {
+                lines.push(`\n🧹 **Liquidity Sweeps**`);
+                result.sweeps.forEach((s, i) => {
+                    const dir = s.fvg_type === "bullish" ? "below bullish FVG" : "above bearish FVG";
+                    lines.push(`\n${i+1}. Swept ${dir} @ ${s.time}`);
+                    lines.push(`   Swept to: ${s.sweep_level}`);
+                });
+            }
+
+            if (result.retests.length > 0) {
+                lines.push(`\n🔄 **Retests**`);
+                result.retests.forEach((r, i) => {
+                    lines.push(`\n${i+1}. ${r.confirmed} @ ${r.time}`);
+                    lines.push(`   Retest at: ${r.retest_price}`);
+                });
+            }
+
+            if (result.fvgs.length === 0) {
+                lines.push(`\nNo FVGs detected in the provided data. Try more candles or a different timeframe.`);
+            }
+
+            return lines.join("\n");
+        }
+
+        function formatHelp() {
+            return `📖 **FVG Scanner Help**
+
+**Usage:**
+Ask the scanner to analyze price data. Provide OHLC candles like:
+
+\`Analyze these candles for FVGs: [high: 100.5, low: 99.2, ...]\`
+
+Or pass structured data with the \`analyze\` action.
+
+**What it detects:**
+• 🔲 Bullish/Bearish Fair Value Gaps
+• 🎯 50-Yard Line (FVG midpoint)
+• 🧹 Liquidity Sweeps below/above FVGs
+• 🔄 Retests of the 50-yard line
+• 📊 Overall market bias
+
+**Example candles format:**
+Each candle needs: high, low, open, close, time
+
+**Tip:** For best results, provide 8-12 candles from the 4H timeframe.`;
+        }
+    </script>
+</body>
+</html>

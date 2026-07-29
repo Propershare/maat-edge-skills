@@ -151,6 +151,54 @@ def handle_search(query):
                 break
     return json_response({"results": results, "count": len(results), "query": query})
 
+# ── Static file server for skills ────────────────────────────────────────
+
+SKILLS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)))
+
+MIME_TYPES = {
+    ".html": "text/html",
+    ".js": "application/javascript",
+    ".md": "text/markdown",
+    ".json": "application/json",
+    ".css": "text/css",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+}
+
+def serve_skill_file(path):
+    """Serve static skill files for AI Edge Gallery to load."""
+    # path is like /skill/maat-lab-bridge/ or /skill/maat-lab-bridge/SKILL.md
+    prefix = "/skill/"
+    if path.startswith(prefix):
+        rel_path = path[len(prefix):]
+    else:
+        rel_path = path
+    if not rel_path or rel_path.endswith("/"):
+        rel_path += "SKILL.md"
+    
+    full_path = os.path.normpath(os.path.join(SKILLS_DIR, rel_path))
+    
+    # Security: ensure we stay within the skills directory
+    if not full_path.startswith(SKILLS_DIR):
+        return error_response("Invalid path", 403)
+    
+    if not os.path.isfile(full_path):
+        return error_response(f"File not found: {rel_path}", 404)
+    
+    ext = os.path.splitext(full_path)[1].lower()
+    content_type = MIME_TYPES.get(ext, "application/octet-stream")
+    
+    try:
+        with open(full_path, "rb") as f:
+            body = f.read()
+        return (200, {
+            "Content-Type": content_type,
+            "Access-Control-Allow-Origin": "*",
+            "Content-Length": str(len(body)),
+        }, body)
+    except Exception as e:
+        return error_response(f"Error reading file: {e}", 500)
+
 # ── Router ────────────────────────────────────────────────────────────────
 
 ROUTES = {
@@ -182,6 +230,8 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
         elif path.startswith("/semantic/") and len(path) > 10:
             domain = path.split("/")[-1]
             status, headers, body = handle_semantic(domain)
+        elif path.startswith("/skill/"):
+            status, headers, body = serve_skill_file(path)
         else:
             status, headers, body = error_response(f"Not found: {path}", 404)
         

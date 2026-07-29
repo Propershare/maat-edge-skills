@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trade Scratchpad Skill</title>
+</head>
+<body>
+    <script>
+        const STORAGE_KEY = "maat_scratchpad";
+
+        window['ai_edge_gallery_get_result'] = async (data) => {
+            try {
+                const params = JSON.parse(data);
+                const action = params.action || "help";
+
+                switch (action) {
+                    case "save":
+                        return JSON.stringify({ result: saveNote(params) });
+                    case "list":
+                        return JSON.stringify({ result: listNotes(params) });
+                    case "search":
+                        return JSON.stringify({ result: searchNotes(params.query) });
+                    case "delete":
+                        return JSON.stringify({ result: deleteNote(params.id) });
+                    case "help":
+                        return JSON.stringify({ result: formatHelp() });
+                    default:
+                        return JSON.stringify({ error: `Unknown action: ${action}` });
+                }
+            } catch (e) {
+                console.error("Scratchpad error:", e);
+                return JSON.stringify({ error: `Failed: ${e.message}` });
+            }
+        };
+
+        function getNotes() {
+            try {
+                return JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
+            } catch { return []; }
+        }
+
+        function saveNotes(notes) {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(notes));
+        }
+
+        function saveNote(params) {
+            if (!params.content || params.content.trim() === "") {
+                return "❌ Content is required";
+            }
+
+            const note = {
+                id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+                timestamp: new Date().toISOString(),
+                content: params.content.trim(),
+                symbol: params.symbol ? params.symbol.toUpperCase() : null,
+                tags: params.tags ? params.tags.split(",").map(t => t.trim()) : [],
+                confidence: params.confidence || null
+            };
+
+            const notes = getNotes();
+            notes.push(note);
+            saveNotes(notes);
+
+            let lines = [`✅ **Note Saved**`];
+            lines.push(`   "${note.content.slice(0, 80)}${note.content.length > 80 ? "..." : ""}"`);
+            if (note.symbol) lines.push(`   Symbol: ${note.symbol}`);
+            if (note.tags.length > 0) lines.push(`   Tags: ${note.tags.join(", ")}`);
+            if (note.confidence) lines.push(`   Confidence: ${note.confidence}/10`);
+            lines.push(`   Total notes: ${notes.length}`);
+            return lines.join("\n");
+        }
+
+        function listNotes(params) {
+            const notes = getNotes();
+            if (notes.length === 0) {
+                return "📭 No notes yet. Save your first trade idea!";
+            }
+
+            let filtered = notes;
+            if (params.symbol) {
+                filtered = notes.filter(n => n.symbol === params.symbol.toUpperCase());
+            }
+
+            const limit = params.limit || 10;
+            const recent = filtered.slice(-limit).reverse();
+
+            let lines = [`📝 **Trade Ideas** (${filtered.length} of ${notes.length})`];
+            recent.forEach((n, i) => {
+                const date = new Date(n.timestamp).toLocaleDateString();
+                const time = new Date(n.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                lines.push(`\n${i+1}. ${n.symbol ? `**${n.symbol}** ` : ""}[${date} ${time}]`);
+                lines.push(`   ${n.content.slice(0, 120)}${n.content.length > 120 ? "..." : ""}`);
+                if (n.tags.length > 0) lines.push(`   🏷️ ${n.tags.join(", ")}`);
+                if (n.confidence) lines.push(`   🔥 ${n.confidence}/10`);
+            });
+
+            return lines.join("\n");
+        }
+
+        function searchNotes(query) {
+            if (!query || query.trim() === "") {
+                return "❌ Query is required";
+            }
+
+            const notes = getNotes();
+            const q = query.toLowerCase();
+            const results = notes.filter(n => 
+                n.content.toLowerCase().includes(q) ||
+                (n.symbol && n.symbol.toLowerCase().includes(q)) ||
+                n.tags.some(t => t.toLowerCase().includes(q))
+            ).reverse();
+
+            if (results.length === 0) {
+                return `🔍 No notes matching "${query}"`;
+            }
+
+            let lines = [`🔍 **Search Results** for "${query}" (${results.length})`];
+            results.slice(0, 10).forEach((n, i) => {
+                const date = new Date(n.timestamp).toLocaleDateString();
+                lines.push(`\n${i+1}. ${n.symbol ? `**${n.symbol}** ` : ""}[${date}]`);
+                lines.push(`   ${n.content.slice(0, 100)}`);
+            });
+
+            return lines.join("\n");
+        }
+
+        function deleteNote(id) {
+            if (!id) return "❌ Note ID is required";
+            
+            const notes = getNotes();
+            const idx = notes.findIndex(n => n.id === id);
+            if (idx === -1) return "❌ Note not found";
+            
+            const removed = notes.splice(idx, 1)[0];
+            saveNotes(notes);
+            return `🗑️ Deleted: "${removed.content.slice(0, 60)}..."`;
+        }
+
+        function formatHelp() {
+            return `📖 **Trade Scratchpad Help**
+
+**Actions:**
+• \`save\` — Save a trade idea (requires: content)
+  Optional: symbol, tags, confidence
+• \`list\` — View saved ideas
+• \`search\` — Search notes (requires: query)
+• \`delete\` — Remove a note (requires: id)
+
+**Example:**
+"Save idea: ES=F looking for bearish FVG sweep at 7450, tags: FVG, sweep, confidence: 7"
+
+All data stays on your device. Nothing leaves your phone.`;
+        }
+    </script>
+</body>
+</html>

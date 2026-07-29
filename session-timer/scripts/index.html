@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Session Timer Skill</title>
+</head>
+<body>
+    <script>
+        // ── Session Definitions (UTC) ───────────────────────────────────
+        const SESSIONS = [
+            { name: "Sydney", open: 21, close: 6, emoji: "🇦🇺", desc: "Sydney open" },
+            { name: "Tokyo/Asia", open: 23, close: 8, emoji: "🇯🇵", desc: "Tokyo open" },
+            { name: "London", open: 7, close: 16, emoji: "🇬🇧", desc: "London open" },
+            { name: "New York", open: 12, close: 21, emoji: "🇺🇸", desc: "New York open" },
+        ];
+
+        // Overlap periods
+        const OVERLAPS = [
+            { name: "London + NY", start: 12, end: 16, emoji: "🌎" },
+            { name: "Asia + London", start: 7, end: 8, emoji: "🌏" },
+            { name: "Sydney + Asia", start: 23, end: 6, emoji: "🌏" },
+        ];
+
+        window['ai_edge_gallery_get_result'] = async (data) => {
+            try {
+                const params = JSON.parse(data);
+                const action = params.action || "now";
+
+                switch (action) {
+                    case "now":
+                        return JSON.stringify({ result: getCurrentSessions() });
+                    case "schedule":
+                        return JSON.stringify({ result: getFullSchedule() });
+                    case "help":
+                        return JSON.stringify({ result: formatHelp() });
+                    default:
+                        return JSON.stringify({ error: `Unknown action: ${action}` });
+                }
+            } catch (e) {
+                console.error("Session Timer error:", e);
+                return JSON.stringify({ error: `Failed: ${e.message}` });
+            }
+        };
+
+        function getCurrentSessions() {
+            const now = new Date();
+            const utcHour = now.getUTCHours();
+            const utcMin = now.getUTCMinutes();
+            const currentTime = utcHour + utcMin / 60;
+
+            let lines = [`⏰ **Trading Sessions** — ${now.toLocaleTimeString()} local`];
+            lines.push(`   UTC: ${utcHour.toString().padStart(2, "0")}:${utcMin.toString().padStart(2, "0")}Z\n`);
+
+            // Active sessions
+            const active = SESSIONS.filter(s => {
+                if (s.open <= s.close) {
+                    return currentTime >= s.open && currentTime < s.close;
+                } else {
+                    return currentTime >= s.open || currentTime < s.close;
+                }
+            });
+
+            if (active.length > 0) {
+                lines.push(`🟢 **Active Sessions**`);
+                active.forEach(s => {
+                    let remaining;
+                    if (s.open <= s.close) {
+                        remaining = (s.close - currentTime).toFixed(1);
+                    } else {
+                        remaining = currentTime >= s.open 
+                            ? ((24 + s.close - currentTime) % 24).toFixed(1)
+                            : (s.close - currentTime).toFixed(1);
+                    }
+                    lines.push(`   ${s.emoji} ${s.name} — ${remaining}h remaining`);
+                });
+            } else {
+                lines.push(`⚫ **No sessions active** — market is between sessions`);
+            }
+
+            // Active overlaps
+            const activeOverlaps = OVERLAPS.filter(o => {
+                if (o.start <= o.end) {
+                    return currentTime >= o.start && currentTime < o.end;
+                } else {
+                    return currentTime >= o.start || currentTime < o.end;
+                }
+            });
+            if (activeOverlaps.length > 0) {
+                lines.push(`\n🔄 **Overlaps**`);
+                activeOverlaps.forEach(o => {
+                    lines.push(`   ${o.emoji} ${o.name}`);
+                });
+            }
+
+            // Upcoming
+            const upcoming = SESSIONS.filter(s => {
+                const openHour = s.open;
+                return openHour > currentTime && (s.open <= s.close ? openHour > currentTime : true);
+            }).sort((a, b) => a.open - b.open);
+
+            if (upcoming.length > 0) {
+                lines.push(`\n⏳ **Upcoming**`);
+                upcoming.slice(0, 2).forEach(s => {
+                    const hoursUntil = (s.open - currentTime).toFixed(1);
+                    lines.push(`   ${s.emoji} ${s.name} opens in ${hoursUntil}h`);
+                });
+            }
+
+            return lines.join("\n");
+        }
+
+        function getFullSchedule() {
+            let lines = [`📅 **Session Schedule** (UTC)`];
+            SESSIONS.forEach(s => {
+                const openStr = `${s.open.toString().padStart(2, "0")}:00`;
+                const closeStr = s.close <= 24 
+                    ? `${s.close.toString().padStart(2, "0")}:00`
+                    : `${(s.close - 24).toString().padStart(2, "0")}:00`;
+                lines.push(`\n${s.emoji} **${s.name}**`);
+                lines.push(`   ${openStr} → ${closeStr} UTC`);
+                lines.push(`   ${s.desc}`);
+            });
+
+            lines.push(`\n🔄 **Overlaps**`);
+            OVERLAPS.forEach(o => {
+                const startStr = `${o.start.toString().padStart(2, "0")}:00`;
+                const endStr = `${o.end.toString().padStart(2, "0")}:00`;
+                lines.push(`   ${o.emoji} ${o.name}: ${startStr} → ${endStr} UTC`);
+            });
+
+            return lines.join("\n");
+        }
+
+        function formatHelp() {
+            return `📖 **Session Timer Help**
+
+**Actions:**
+• \`now\` — Show current active sessions
+• \`schedule\` — Full session schedule
+
+**Sessions tracked:**
+🇦🇺 Sydney (21:00-06:00 UTC)
+🇯🇵 Tokyo/Asia (23:00-08:00 UTC)
+🇬🇧 London (07:00-16:00 UTC)
+🇺🇸 New York (12:00-21:00 UTC)
+
+**Best trading overlaps:**
+🌎 London + NY (12:00-16:00 UTC) — highest volume
+🌏 Asia + London (07:00-08:00 UTC)`;
+        }
+    </script>
+</body>
+</html>
