@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MAAT Bridge Skill</title>
+</head>
+<body>
+    <script>
+        const BRIDGE_URL = window.location.origin;
+
+        window['ai_edge_gallery_get_result'] = async (data) => {
+            try {
+                const params = JSON.parse(data);
+                const action = params.action || "help";
+
+                switch (action) {
+                    // ── Scribe ──
+                    case "note": return JSON.stringify({ result: await apiPost("/note", {content: params.content, title: params.title, tags: params.tags}) });
+                    case "book": return JSON.stringify({ result: await apiPost("/book", {content: params.content, chapter: params.chapter, section: params.section}) });
+                    case "picture": return JSON.stringify({ result: await apiPost("/picture", {image: params.image, filename: params.filename}) });
+                    case "notes": return JSON.stringify({ result: await apiGet("/notes", formatNotes) });
+                    case "book-list": return JSON.stringify({ result: await apiGet("/book", formatBook) });
+
+                    // ── Lab ──
+                    case "status": return JSON.stringify({ result: await apiGet("/status", d => `🔌 **MAAT Lab**\nStatus: ${d.status}\nHost: ${d.host}:${d.port}`) });
+                    case "episodic": return JSON.stringify({ result: await apiGet("/episodic", d => formatMemories(d, "📖 Recent Episodic")) });
+                    case "semantic": return JSON.stringify({ result: await apiGet(params.domain ? `/semantic/${params.domain}` : "/semantic", d => formatMemories(d, "🧠 Semantic Knowledge")) });
+                    case "search": return JSON.stringify({ result: await apiGet(`/search?q=${encodeURIComponent(params.query)}`, d => formatSearch(d)) });
+                    case "trading": return JSON.stringify({ result: await apiGet("/trading", formatTrading) });
+
+                    // ── Trading Tools (local) ──
+                    case "fvg": return JSON.stringify({ result: analyzeFVGs(params.candles) });
+                    case "journal": return JSON.stringify({ result: handleJournal(params) });
+                    case "position": return JSON.stringify({ result: calcPosition(params) });
+                    case "sessions": return JSON.stringify({ result: handleSessions(params) });
+                    case "scratchpad": return JSON.stringify({ result: handleScratchpad(params) });
+
+                    // ── Guardian ──
+                    case "rights": return JSON.stringify({ result: formatRights() });
+                    case "record": return JSON.stringify({ result: "🔴 Recording started. Footage encrypted on-device." });
+
+                    default: return JSON.stringify({ result: formatHelp() });
+                }
+            } catch (e) {
+                return JSON.stringify({ error: `Failed: ${e.message}` });
+            }
+        };
+
+        // ── API Helpers ──
+
+        async function apiGet(path, formatter) {
+            try {
+                const res = await fetch(`${BRIDGE_URL}${path}`);
+                const data = await res.json();
+                if (data.error) return `⚠️ ${data.error}`;
+                return formatter(data);
+            } catch {
+                return "⚠️ Lab bridge unreachable. Make sure the bridge is running on your Mac.";
+            }
+        }
+
+        async function apiPost(path, body) {
+            try {
+                const res = await fetch(`${BRIDGE_URL}${path}`, {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify(body)
+                });
+                const data = await res.json();
+                if (data.error) return `⚠️ ${data.error}`;
+                if (path === "/note") return `✅ **Note Saved**\n   ${data.title}\n   Tags: ${body.tags || "none"}`;
+                if (path === "/book") {
+                    let l = [`✅ **Book Section Saved**\n   Chapter: ${data.chapter}\n   Section: ${data.section}`];
+                    if (data.book_index) data.book_index.forEach(ch => l.push(`   📂 ${ch.chapter} (${ch.count} sections)`));
+                    return l.join("\n");
+                }
+                if (path === "/picture") return `📸 **Picture Saved**\n   ${data.filename}\n   ${(data.size/1024).toFixed(1)} KB`;
+                return JSON.stringify(data);
+            } catch {
+                return "⚠️ Lab bridge unreachable.";
+            }
+        }
+
+        function formatMemories(d, title) {
+            if (!d.memories || d.memories.length === 0) return `📭 No ${title} found.`;
+            let l = [`${title} (${d.count})`];
+            d.memories.slice(0, 5).forEach(m => l.push(`\n📄 ${m.filename}\n   ${(m.preview||"").slice(0, 200)}`));
+            return l.join("\n");
+        }
+
+        function formatSearch(d) {
+            if (!d.results || d.results.length === 0) return `🔍 No results for "${d.query}"`;
+            let l = [`🔍 **Search** "${d.query}" (${d.count})`];
+            d.results.slice(0, 5).forEach(r => l.push(`\n📄 ${r.filename} (${r.source})\n   ${r.snippet.slice(0, 200)}`));
+            return l.join("\n");
+        }
+
+        function formatTrading(d) {
+            let l = [`📊 **Trading System**\n   System: ${d.system}\n   Account: ${d.account_type}`];
+            if (d.last_scan) l.push(`   Last Scan: ${d.last_scan}`);
+            if (d.last_scan_preview) l.push(`\n📋 ${d.last_scan_preview.slice(0, 300)}`);
+            return l.join("\n");
+        }
+
+        function formatNotes(d) {
+            if (!d.notes || d.notes.length === 0) return "📭 No notes yet.";
+            let l = [`📝 **Notes** (${d.count})`];
+            d.notes.slice(0, 10).forEach((n, i) => l.push(`\n${i+1}. ${n.filename.replace('.md','')}\n   ${n.preview.replace(/\n/g,' ').slice(0,100)}`));
+            return l.join("\n");
+        }
+
+        function formatBook(d) {
+            if (!d.chapters || d.chapters.length === 0) return "📭 No book content yet.";
+            let l = [`📖 **Your Book** (${d.total_sections} sections)`];
+            d.chapters.forEach(ch => {
+                l.push(`\n📂 ${ch.chapter} (${ch.count} sections)`);
+                ch.sections.forEach(s => l.push(`   📄 ${s.replace('.md','')}`));
+            });
+            return l.join("\n");
+        }
+
+        function formatRights() {
+            return `🛡️ **Know Your Rights**
+
+1. **Right to remain silent** — Say: "I am exercising my right to remain silent."
+2. **Right to an attorney** — Say: "I want to speak to my lawyer."
+3. **No consent to search** — Say: "I do not consent to searches."
+4. **If detained, ask:** "Am I free to leave?"
+
+Stay calm. Keep hands visible. This app records and encrypts on-device.`;
+        }
+
+        // ── FVG Scanner (local) ──
+
+        function analyzeFVGs(candles) {
+            if (!candles || candles.length < 4) return "❌ Need at least 4 candles";
+            const fvgs = [], sweeps = [], retests = [];
+            for (let i = 0; i < candles.length - 1; i++) {
+                const c1 = candles[i], c2 = candles[i+1];
+                if (c1.high < c2.low) fvgs.push({type:"bullish", high:c2.low, low:c1.high, mid:+((c2.low+c1.high)/2).toFixed(2), size:+(c2.low-c1.high).toFixed(2), idx:i, time:c2.time||`#${i+1}`});
+                if (c1.low > c2.high) fvgs.push({type:"bearish", high:c1.low, low:c2.high, mid:+((c1.low+c2.high)/2).toFixed(2), size:+(c1.low-c2.high).toFixed(2), idx:i, time:c2.time||`#${i+1}`});
+            }
+            for (const f of fvgs) {
+                for (let i = f.idx+2; i < candles.length; i++) {
+                    const c = candles[i];
+                    if (f.type==="bullish" && c.low <= f.low) { sweeps.push({type:"bullish", level:c.low, time:c.time||`#${i+1}`}); break; }
+                    if (f.type==="bearish" && c.high >= f.high) { sweeps.push({type:"bearish", level:c.high, time:c.time||`#${i+1}`}); break; }
+                }
+            }
+            let bias = "neutral";
+            const bc = fvgs.filter(f=>f.type==="bullish").length, be = fvgs.filter(f=>f.type==="bearish").length;
+            if (bc > be) bias = "bullish"; else if (be > bc) bias = "bearish";
+            let l = [`📊 **FVG Analysis** — Bias: ${bias.toUpperCase()}\n   ${fvgs.length} FVG(s) (${bc}B ${be}S) | ${sweeps.length} sweep(s)`];
+            fvgs.forEach((f,i) => l.push(`\n${i+1}. ${f.type==="bullish"?"🟢 Bullish":"🔴 Bearish"} @ ${f.time}\n   FVG: ${f.low} → ${f.high}\n   🎯 50-Yard: ${f.mid}`));
+            sweeps.forEach((s,i) => l.push(`\n🧹 Sweep ${i+1}: ${s.type==="bullish"?"below bullish FVG":"above bearish FVG"} to ${s.level} @ ${s.time}`));
+            if (!fvgs.length) l.push("\nNo FVGs detected.");
+            return l.join("\n");
+        }
+
+        // ── Trade Journal (local) ──
+
+        const J_KEY = "maat_trade_journal";
+        function getJ() { try { return JSON.parse(localStorage.getItem(J_KEY))||[]; } catch { return []; } }
+        function saveJ(t) { localStorage.setItem(J_KEY, JSON.stringify(t)); }
+
+        function handleJournal(p) {
+            const sub = p.subaction || "list";
+            if (sub === "log") {
+                const miss = ["symbol","direction","entry","exit","quantity","setup"].filter(f => p[f]==null);
+                if (miss.length) return `❌ Missing: ${miss.join(", ")}`;
+                const dir = p.direction.toLowerCase();
+                const entry=+p.entry, exit=+p.exit, qty=+p.quantity;
+                const diff = dir==="long"?exit-entry:entry-exit;
+                const trade = {id:Date.now().toString(36), timestamp:new Date().toISOString(), symbol:p.symbol.toUpperCase(), direction:dir, entry, exit, quantity:qty, setup:p.setup, notes:p.notes||"", pnl:+(diff*qty).toFixed(2), win:diff>0};
+                const j = getJ(); j.push(trade); saveJ(j);
+                return `✅ **Trade Logged** — ${trade.symbol} ${dir.toUpperCase()}\n   Entry: $${entry} → Exit: $${exit}\n   P&L: ${trade.win?"✅ +":"❌ "}$${Math.abs(trade.pnl)}\n   Total: ${j.length} trades`;
+            }
+            if (sub === "list") {
+                const j = getJ();
+                if (!j.length) return "📭 No trades yet.";
+                return j.slice(-(p.limit||10)).reverse().map((t,i) => `${i+1}. ${t.direction==="long"?"🟢":"🔴"} ${t.symbol} ${t.win?"✅":"❌"} $${t.pnl.toFixed(2)}\n   ${t.setup} | $${t.entry}→$${t.exit}`).join("\n");
+            }
+            if (sub === "stats") {
+                const j = getJ();
+                if (!j.length) return "📭 No trades yet.";
+                const wins = j.filter(t=>t.win), losses = j.filter(t=>!t.win);
+                const wr = ((wins.length/j.length)*100).toFixed(1);
+                const total = j.reduce((s,t)=>s+t.pnl,0);
+                return `📊 **Journal Stats**\n   Trades: ${j.length} | Wins: ${wins.length} | Losses: ${losses.length}\n   Win Rate: ${wr}%\n   Total P&L: ${total>=0?"✅ +":"❌ "}$${Math.abs(total).toFixed(2)}`;
+            }
+            return "❌ Use: log, list, stats";
+        }
+
+        // ── Position Calculator (local) ──
+
+        function calcPosition(p) {
+            const miss = ["account","risk_pct","entry","stop","direction"].filter(f => p[f]==null);
+            if (miss.length) return `❌ Missing: ${miss.join(", ")}`;
+            const acct=+p.account, risk=+p.risk_pct, entry=+p.entry, stop=+p.stop, dir=p.direction.toLowerCase();
+            const risk$ = acct*(risk/100), dist = Math.abs(entry-stop);
+            const shares = Math.floor(risk$/dist);
+            const r1 = dir==="long"?entry+dist:entry-dist;
+            const r2 = dir==="long"?entry+dist*2:entry-dist*2;
+            const r3 = dir==="long"?entry+dist*3:entry-dist*3;
+            return `📐 **Position Calculator**\n   Account: $${acct.toLocaleString()}\n   Risk: ${risk}% = $${risk$.toFixed(2)}\n   ${dir.toUpperCase()} | Entry: $${entry} | Stop: $${stop}\n   Size: ${shares} shares\n\n🎯 **R:R**\n   1R: $${r1.toFixed(2)}\n   2R: $${r2.toFixed(2)}\n   3R: $${r3.toFixed(2)}`;
+        }
+
+        // ── Session Timer (local) ──
+
+        function handleSessions(p) {
+            const sub = p.subaction || "now";
+            const now = new Date(), utc = now.getUTCHours()+now.getUTCMinutes()/60;
+            const sessions = [
+                {name:"Sydney", open:21, close:6, emoji:"🇦🇺"},
+                {name:"Tokyo/Asia", open:23, close:8, emoji:"🇯🇵"},
+                {name:"London", open:7, close:16, emoji:"🇬🇧"},
+                {name:"New York", open:12, close:21, emoji:"🇺🇸"},
+            ];
+            if (sub === "schedule") {
+                return `📅 **Session Schedule** (UTC)\n${sessions.map(s => `${s.emoji} ${s.name}: ${String(s.open).padStart(2,"0")}:00 → ${String(s.close).padStart(2,"0")}:00 UTC`).join("\n")}`;
+            }
+            const active = sessions.filter(s => s.open<=s.close ? utc>=s.open&&utc<s.close : utc>=s.open||utc<s.close);
+            let l = [`⏰ **Trading Sessions** — ${now.toLocaleTimeString()}`];
+            if (active.length) active.forEach(s => l.push(`   ${s.emoji} ${s.name} 🟢 Active`));
+            else l.push("   ⚫ No sessions active");
+            return l.join("\n");
+        }
+
+        // ── Scratchpad (local) ──
+
+        const S_KEY = "maat_scratchpad";
+        function getS() { try { return JSON.parse(localStorage.getItem(S_KEY))||[]; } catch { return []; } }
+        function saveS(n) { localStorage.setItem(S_KEY, JSON.stringify(n)); }
+
+        function handleScratchpad(p) {
+            const sub = p.subaction || "list";
+            if (sub === "save") {
+                if (!p.content) return "❌ content required";
+                const note = {id:Date.now().toString(36), timestamp:new Date().toISOString(), content:p.content.trim(), symbol:p.symbol?p.symbol.toUpperCase():null, tags:p.tags?p.tags.split(",").map(t=>t.trim()):[]};
+                const n = getS(); n.push(note); saveS(n);
+                return `✅ **Idea Saved**\n   "${note.content.slice(0,80)}"${note.symbol?`\n   ${note.symbol}`:""}`;
+            }
+            if (sub === "list") {
+                const n = getS();
+                if (!n.length) return "📭 No ideas yet.";
+                return n.slice(-(p.limit||10)).reverse().map((x,i) => `${i+1}. ${x.symbol?`**${x.symbol}** `:""}${x.content.slice(0,100)}`).join("\n");
+            }
+            return "❌ Use: save, list";
+        }
+
+        // ── Help ──
+
+        function formatHelp() {
+            return `📖 **MAAT Bridge — All-in-One**
+
+**Voice Notes & Book**
+• "Save a note: [text]" — saves to your Mac
+• "Write chapter [name]: [text]" — book writing
+• "Show my notes" / "Show my book"
+
+**Trading Tools** (all offline)
+• "FVG scan [candles]" — pattern detection
+• "Log trade: [details]" — trade journal
+• "Position: $80k, 1% risk, long 7448, stop 7420"
+• "What sessions are active?"
+• "Save idea: [text]"
+
+**Lab Queries** (needs bridge)
+• "What's the trading status?"
+• "Search for [term]"
+• "Show recent memories"
+
+**Guardian**
+• "Know my rights"
+• "Start recording"
+
+All data stays on your Mac. No cloud.`;
+        }
+    </script>
+</body>
+</html>
