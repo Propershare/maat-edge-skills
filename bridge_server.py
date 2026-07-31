@@ -237,6 +237,139 @@ def handle_generate(data):
     INVITE_CODES[code] = {"member": member, "status": "active"}
     return json_response({"code": code, "member": member})
 
+# ── Scribe: Notes, Book, Pictures ────────────────────────────────────────
+
+NOTES_DIR = os.path.expanduser("~/maat-ecosystem/maat-scribe/notes")
+BOOK_DIR = os.path.expanduser("~/maat-ecosystem/maat-scribe/book")
+PICTURES_DIR = os.path.expanduser("~/maat-ecosystem/maat-scribe/pictures")
+
+for d in [NOTES_DIR, BOOK_DIR, PICTURES_DIR]:
+    os.makedirs(d, exist_ok=True)
+
+def handle_save_note(data):
+    """Save a voice note to local files + MAAT memory."""
+    content = data.get("content", "").strip()
+    title = data.get("title", f"note-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+    tags = data.get("tags", "")
+    
+    if not content:
+        return error_response("content is required")
+    
+    # Save to local file
+    filename = f"{title}.md"
+    filepath = os.path.join(NOTES_DIR, filename)
+    
+    note_content = f"""# {title}
+
+**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**Tags:** {tags}
+
+{content}
+"""
+    with open(filepath, "w") as f:
+        f.write(note_content)
+    
+    # Also write to MAAT episodic memory
+    memory_result = run_mcp_tool("maat_memory_write_episodic", {
+        "content": f"# Scribe Note: {title}\ntimestamp: {datetime.utcnow().isoformat()}\nsource: maat-scribe\n\ntags: {tags}\n\n{content}"
+    })
+    
+    return json_response({
+        "saved": True,
+        "file": filepath,
+        "title": title,
+        "memory": memory_result.get("status", "written")
+    })
+
+def handle_save_book(data):
+    """Save a book chapter/section to local files."""
+    content = data.get("content", "").strip()
+    chapter = data.get("chapter", "untitled")
+    section = data.get("section", "")
+    
+    if not content:
+        return error_response("content is required")
+    
+    chapter_dir = os.path.join(BOOK_DIR, chapter)
+    os.makedirs(chapter_dir, exist_ok=True)
+    
+    if section:
+        filename = f"{section}.md"
+    else:
+        filename = f"section-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md"
+    
+    filepath = os.path.join(chapter_dir, filename)
+    
+    book_content = f"""# {chapter} — {section or filename}
+
+**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+{content}
+"""
+    with open(filepath, "w") as f:
+        f.write(book_content)
+    
+    # Build book index
+    index = []
+    for ch in sorted(os.listdir(BOOK_DIR)):
+        ch_path = os.path.join(BOOK_DIR, ch)
+        if os.path.isdir(ch_path):
+            sections = [s.replace(".md", "") for s in sorted(os.listdir(ch_path)) if s.endswith(".md")]
+            index.append({"chapter": ch, "sections": sections, "count": len(sections)})
+    
+    return json_response({
+        "saved": True,
+        "file": filepath,
+        "chapter": chapter,
+        "section": section or filename,
+        "book_index": index
+    })
+
+def handle_save_picture(data):
+    """Save a base64-encoded picture to local files."""
+    image_b64 = data.get("image", "")
+    filename = data.get("filename", f"pic-{datetime.now().strftime('%Y%m%d-%H%M%S')}.png")
+    
+    if not image_b64:
+        return error_response("image (base64) is required")
+    
+    import base64
+    try:
+        image_data = base64.b64decode(image_b64)
+        filepath = os.path.join(PICTURES_DIR, filename)
+        with open(filepath, "wb") as f:
+            f.write(image_data)
+        return json_response({"saved": True, "file": filepath, "filename": filename, "size": len(image_data)})
+    except Exception as e:
+        return error_response(f"Failed to decode image: {e}")
+
+def handle_list_notes():
+    """List all saved notes."""
+    if not os.path.isdir(NOTES_DIR):
+        return json_response({"notes": [], "count": 0})
+    notes = []
+    for f in sorted(os.listdir(NOTES_DIR), reverse=True):
+        if f.endswith(".md"):
+            path = os.path.join(NOTES_DIR, f)
+            with open(path) as fh:
+                preview = fh.read(300)
+            notes.append({"filename": f, "preview": preview[:200], "size": os.path.getsize(path)})
+    return json_response({"notes": notes, "count": len(notes)})
+
+def handle_list_book():
+    """List book structure."""
+    if not os.path.isdir(BOOK_DIR):
+        return json_response({"chapters": [], "total_sections": 0})
+    chapters = []
+    total = 0
+    for ch in sorted(os.listdir(BOOK_DIR)):
+        ch_path = os.path.join(BOOK_DIR, ch)
+        if os.path.isdir(ch_path):
+            sections = sorted(os.listdir(ch_path))
+            total += len(sections)
+            chapters.append({"chapter": ch, "sections": sections, "count": len(sections)})
+    return json_response({"chapters": chapters, "total_sections": total})
+
 # ── Router ────────────────────────────────────────────────────────────────
 
 ROUTES = {
@@ -246,6 +379,8 @@ ROUTES = {
     "/semantic": lambda: handle_semantic(),
     "/artifacts": handle_artifacts,
     "/trading": handle_trading_status,
+    "/notes": handle_list_notes,
+    "/book": handle_list_book,
 }
 
 class BridgeHandler(http.server.BaseHTTPRequestHandler):
@@ -303,6 +438,12 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
             status, headers, body = handle_register(data)
         elif path == "/generate":
             status, headers, body = handle_generate(data)
+        elif path == "/note":
+            status, headers, body = handle_save_note(data)
+        elif path == "/book":
+            status, headers, body = handle_save_book(data)
+        elif path == "/picture":
+            status, headers, body = handle_save_picture(data)
         else:
             status, headers, body = error_response(f"Not found: {path}", 404)
         

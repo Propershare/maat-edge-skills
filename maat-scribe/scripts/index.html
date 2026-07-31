@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MAAT Scribe Skill</title>
+</head>
+<body>
+    <script>
+        const BRIDGE_URL = window.location.origin;
+
+        window['ai_edge_gallery_get_result'] = async (data) => {
+            try {
+                const params = JSON.parse(data);
+                const action = params.action || "help";
+
+                switch (action) {
+                    case "note":
+                        return JSON.stringify({ result: await saveNote(params) });
+                    case "book":
+                        return JSON.stringify({ result: await saveBook(params) });
+                    case "picture":
+                        return JSON.stringify({ result: await savePicture(params) });
+                    case "notes":
+                        return JSON.stringify({ result: await listNotes() });
+                    case "book-list":
+                        return JSON.stringify({ result: await listBook() });
+                    case "help":
+                        return JSON.stringify({ result: formatHelp() });
+                    default:
+                        return JSON.stringify({ error: `Unknown action: ${action}` });
+                }
+            } catch (e) {
+                return JSON.stringify({ error: `Failed: ${e.message}` });
+            }
+        };
+
+        async function saveNote(params) {
+            if (!params.content) return "❌ Content is required. Tell me what to write.";
+            
+            const res = await fetch(`${BRIDGE_URL}/note`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    content: params.content,
+                    title: params.title || null,
+                    tags: params.tags || ""
+                })
+            });
+            const result = await res.json();
+            
+            if (result.error) return `❌ ${result.error}`;
+            return `✅ **Note Saved**\n   Title: ${result.title}\n   File: ${result.file}\n   Tags: ${params.tags || "none"}`;
+        }
+
+        async function saveBook(params) {
+            if (!params.content) return "❌ Content is required. Tell me what to write.";
+            
+            const res = await fetch(`${BRIDGE_URL}/book`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    content: params.content,
+                    chapter: params.chapter || "Untitled",
+                    section: params.section || ""
+                })
+            });
+            const result = await res.json();
+            
+            if (result.error) return `❌ ${result.error}`;
+            
+            let lines = [`✅ **Book Section Saved**`];
+            lines.push(`   Chapter: ${result.chapter}`);
+            lines.push(`   Section: ${result.section}`);
+            lines.push(`   File: ${result.file}`);
+            
+            if (result.book_index && result.book_index.length > 0) {
+                lines.push(`\n📖 **Book Structure**`);
+                result.book_index.forEach(ch => {
+                    lines.push(`   📂 ${ch.chapter} (${ch.count} sections)`);
+                });
+            }
+            return lines.join("\n");
+        }
+
+        async function savePicture(params) {
+            if (!params.image) return "❌ Image data is required. Take a photo first.";
+            
+            const res = await fetch(`${BRIDGE_URL}/picture`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    image: params.image,
+                    filename: params.filename || null
+                })
+            });
+            const result = await res.json();
+            
+            if (result.error) return `❌ ${result.error}`;
+            return `📸 **Picture Saved**\n   File: ${result.filename}\n   Size: ${(result.size / 1024).toFixed(1)} KB\n   Path: ${result.file}`;
+        }
+
+        async function listNotes() {
+            const res = await fetch(`${BRIDGE_URL}/notes`);
+            const result = await res.json();
+            
+            if (!result.notes || result.notes.length === 0) {
+                return "📭 No notes yet. Say 'save a note' to start writing.";
+            }
+            
+            let lines = [`📝 **Saved Notes** (${result.count})`];
+            result.notes.slice(0, 10).forEach((n, i) => {
+                lines.push(`\n${i+1}. **${n.filename.replace('.md', '')}**`);
+                const preview = n.preview.replace(/\n/g, ' ').trim();
+                lines.push(`   ${preview.slice(0, 100)}`);
+            });
+            return lines.join("\n");
+        }
+
+        async function listBook() {
+            const res = await fetch(`${BRIDGE_URL}/book`);
+            const result = await res.json();
+            
+            if (!result.chapters || result.chapters.length === 0) {
+                return "📭 No book content yet. Say 'write a chapter' to start your book.";
+            }
+            
+            let lines = [`📖 **Your Book** (${result.total_sections} sections)`];
+            result.chapters.forEach(ch => {
+                lines.push(`\n📂 **${ch.chapter}** (${ch.count} sections)`);
+                ch.sections.forEach(s => {
+                    lines.push(`   📄 ${s.replace('.md', '')}`);
+                });
+            });
+            return lines.join("\n");
+        }
+
+        function formatHelp() {
+            return `📖 **MAAT Scribe — Voice-Powered Writing**
+
+**What you can do:**
+
+📝 **Save a note**
+   "Save a note: remember this trade idea..."
+   "Note: ES=F looking bearish at 7450, tags: trading, FVG"
+
+📖 **Write your book**
+   "Write chapter 1: The Journey Begins"
+   "Add to chapter 2, section: Market Structure"
+
+📸 **Save a picture**
+   Take a photo and say "Save this picture"
+
+📋 **List your notes**
+   "Show my notes" or "What did I save?"
+
+📚 **Check your book**
+   "Show my book structure"
+
+All data saves to your Mac. Nothing goes to the cloud.`;
+        }
+    </script>
+</body>
+</html>
