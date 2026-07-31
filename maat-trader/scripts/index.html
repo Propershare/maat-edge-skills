@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MAAT Trader Skill</title>
+</head>
+<body>
+    <script>
+        // ── Storage Keys ────────────────────────────────────────────────
+        const JOURNAL_KEY = "maat_trade_journal";
+        const SCRATCH_KEY = "maat_scratchpad";
+
+        window['ai_edge_gallery_get_result'] = async (data) => {
+            try {
+                const params = JSON.parse(data);
+                const action = params.action || "help";
+
+                switch (action) {
+                    // ── FVG Scanner ──
+                    case "fvg":
+                        if (!params.candles || params.candles.length < 4)
+                            return JSON.stringify({ error: "Need at least 4 candles" });
+                        return JSON.stringify({ result: formatFVG(analyzeFVGs(params.candles)) });
+
+                    // ── Trade Journal ──
+                    case "journal":
+                        return JSON.stringify({ result: handleJournal(params) });
+
+                    // ── Position Calculator ──
+                    case "position":
+                        return JSON.stringify({ result: calcPosition(params) });
+
+                    // ── Session Timer ──
+                    case "sessions":
+                        return JSON.stringify({ result: handleSessions(params) });
+
+                    // ── Scratchpad ──
+                    case "scratchpad":
+                        return JSON.stringify({ result: handleScratchpad(params) });
+
+                    default:
+                        return JSON.stringify({ result: formatHelp() });
+                }
+            } catch (e) {
+                return JSON.stringify({ error: `Failed: ${e.message}` });
+            }
+        };
+
+        // ═══════════════════════════════════════════════════════════════
+        //  1. FVG SCANNER
+        // ═══════════════════════════════════════════════════════════════
+
+        function analyzeFVGs(candles) {
+            const fvgs = [], sweeps = [], retests = [];
+            for (let i = 0; i < candles.length - 1; i++) {
+                const c1 = candles[i], c2 = candles[i+1];
+                if (c1.high < c2.low) fvgs.push({type:"bullish", high:c2.low, low:c1.high, mid:+((c2.low+c1.high)/2).toFixed(2), size:+(c2.low-c1.high).toFixed(2), idx:i, time:c2.time||`#${i+1}`});
+                if (c1.low > c2.high) fvgs.push({type:"bearish", high:c1.low, low:c2.high, mid:+((c1.low+c2.high)/2).toFixed(2), size:+(c1.low-c2.high).toFixed(2), idx:i, time:c2.time||`#${i+1}`});
+            }
+            for (const f of fvgs) {
+                for (let i = f.idx+2; i < candles.length; i++) {
+                    const c = candles[i];
+                    if (f.type==="bullish" && c.low <= f.low) { sweeps.push({type:"bullish", level:c.low, fvg_low:f.low, time:c.time||`#${i+1}`, ci:i}); break; }
+                    if (f.type==="bearish" && c.high >= f.high) { sweeps.push({type:"bearish", level:c.high, fvg_high:f.high, time:c.time||`#${i+1}`, ci:i}); break; }
+                }
+            }
+            for (const s of sweeps) {
+                const f = fvgs.find(f => (s.type==="bullish" && f.type==="bullish") || (s.type==="bearish" && f.type==="bearish"));
+                if (!f) continue;
+                for (let i = s.ci+1; i < candles.length; i++) {
+                    const c = candles[i], tol = f.size * 0.1;
+                    if (c.low <= f.mid+tol && c.high >= f.mid-tol) {
+                        retests.push({type:f.type, price:f.mid, time:c.time||`#${i+1}`, ci:i, confirmed: c.close > f.mid ? (f.type==="bullish"?"✅ bullish":"❌ bearish fail") : c.close < f.mid ? (f.type==="bearish"?"✅ bearish":"❌ bullish fail") : "⏳ neutral"});
+                        break;
+                    }
+                }
+            }
+            let bias = "neutral", reasons = [];
+            const bc = fvgs.filter(f=>f.type==="bullish").length, be = fvgs.filter(f=>f.type==="bearish").length;
+            if (bc > be) bias = "bullish"; else if (be > bc) bias = "bearish";
+            if (fvgs.length) reasons.push(`${fvgs.length} FVG(s) (${bc}B ${be}S)`);
+            if (sweeps.length) reasons.push(`${sweeps.length} sweep(s)`);
+            if (retests.length) reasons.push(`${retests.length} retest(s)`);
+            return {fvgs, sweeps, retests, bias, reasons};
+        }
+
+        function formatFVG(r) {
+            let l = [`📊 **FVG Analysis** — Bias: ${r.bias.toUpperCase()}\n   ${r.reasons.join(" | ")}`];
+            if (r.fvgs.length) {
+                l.push(`\n🔲 **Fair Value Gaps**`);
+                r.fvgs.forEach((f,i) => l.push(`\n${i+1}. ${f.type==="bullish"?"🟢 Bullish":"🔴 Bearish"} @ ${f.time}\n   FVG: ${f.low} → ${f.high}\n   🎯 50-Yard: ${f.mid}\n   Size: ${f.size}`));
+            }
+            if (r.sweeps.length) {
+                l.push(`\n🧹 **Sweeps**`);
+                r.sweeps.forEach((s,i) => l.push(`\n${i+1}. Swept ${s.type==="bullish"?"below bullish FVG":"above bearish FVG"} @ ${s.time}\n   To: ${s.level}`));
+            }
+            if (r.retests.length) {
+                l.push(`\n🔄 **Retests**`);
+                r.retests.forEach((r,i) => l.push(`\n${i+1}. ${r.confirmed} @ ${r.time}\n   At: ${r.price}`));
+            }
+            if (!r.fvgs.length) l.push(`\nNo FVGs detected. Try more candles.`);
+            return l.join("\n");
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        //  2. TRADE JOURNAL
+        // ═══════════════════════════════════════════════════════════════
+
+        function getJournal() { try { return JSON.parse(localStorage.getItem(JOURNAL_KEY))||[]; } catch { return []; } }
+        function saveJournal(t) { localStorage.setItem(JOURNAL_KEY, JSON.stringify(t)); }
+
+        function handleJournal(p) {
+            const sub = p.subaction || "list";
+            if (sub === "log") {
+                const miss = ["symbol","direction","entry","exit","quantity","setup"].filter(f => p[f]==null);
+                if (miss.length) return `❌ Missing: ${miss.join(", ")}`;
+                const dir = p.direction.toLowerCase();
+                if (dir!=="long"&&dir!=="short") return "❌ direction must be long/short";
+                const entry=+p.entry, exit=+p.exit, qty=+p.quantity;
+                const diff = dir==="long"?exit-entry:entry-exit;
+                const trade = {id:Date.now().toString(36), timestamp:new Date().toISOString(), symbol:p.symbol.toUpperCase(), direction:dir, entry, exit, quantity:qty, setup:p.setup, notes:p.notes||"", pnl:+(diff*qty).toFixed(2), win:diff>0};
+                const j = getJournal(); j.push(trade); saveJournal(j);
+                return `✅ **Trade Logged** — ${trade.symbol} ${dir.toUpperCase()}\n   Entry: $${entry} → Exit: $${exit}\n   Qty: ${qty} | P&L: ${trade.win?"✅ +":"❌ "}$${Math.abs(trade.pnl)}\n   Setup: ${p.setup}\n   Total: ${j.length} trades`;
+            }
+            if (sub === "list") {
+                const j = getJournal();
+                if (!j.length) return "📭 No trades yet.";
+                const recent = j.slice(-(p.limit||10)).reverse();
+                let l = [`📋 **Recent Trades** (${j.length} total)`];
+                recent.forEach((t,i) => l.push(`\n${i+1}. ${t.direction==="long"?"🟢":"🔴"} ${t.symbol} ${t.win?"✅":"❌"} $${t.pnl.toFixed(2)}\n   ${t.setup} | Entry: $${t.entry} → Exit: $${t.exit}\n   ${new Date(t.timestamp).toLocaleDateString()}`));
+                return l.join("\n");
+            }
+            if (sub === "stats") {
+                const j = getJournal();
+                if (!j.length) return "📭 No trades yet.";
+                const wins = j.filter(t=>t.win), losses = j.filter(t=>!t.win);
+                const wr = ((wins.length/j.length)*100).toFixed(1);
+                const total = j.reduce((s,t)=>s+t.pnl,0);
+                const aw = wins.length ? (wins.reduce((s,t)=>s+t.pnl,0)/wins.length).toFixed(2) : 0;
+                const al = losses.length ? (losses.reduce((s,t)=>s+t.pnl,0)/losses.length).toFixed(2) : 0;
+                const best = j.reduce((b,t)=>t.pnl>b.pnl?t:b,j[0]);
+                const worst = j.reduce((w,t)=>t.pnl<w.pnl?t:w,j[0]);
+                let l = [`📊 **Journal Stats**\n   Trades: ${j.length} | Wins: ${wins.length} | Losses: ${losses.length}\n   Win Rate: ${wr}%\n   Total P&L: ${total>=0?"✅ +":"❌ "}$${Math.abs(total).toFixed(2)}\n\n💰 **Averages**\n   Avg Win: +$${aw} | Avg Loss: -$${Math.abs(al)}\n\n🏆 Best: ${best.symbol} +$${best.pnl.toFixed(2)}\n💀 Worst: ${worst.symbol} -$${Math.abs(worst.pnl).toFixed(2)}`];
+                return l.join("\n");
+            }
+            if (sub === "clear") {
+                if (p.confirm) { localStorage.removeItem(JOURNAL_KEY); return "🗑️ Journal cleared."; }
+                return "⚠️ Pass confirm:true to clear";
+            }
+            return "❌ Unknown subaction. Use: log, list, stats, clear";
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        //  3. POSITION CALCULATOR
+        // ═══════════════════════════════════════════════════════════════
+
+        function calcPosition(p) {
+            const miss = ["account","risk_pct","entry","stop","direction"].filter(f => p[f]==null);
+            if (miss.length) return `❌ Missing: ${miss.join(", ")}`;
+            const acct=+p.account, risk=+p.risk_pct, entry=+p.entry, stop=+p.stop, dir=p.direction.toLowerCase();
+            if (dir!=="long"&&dir!=="short") return "❌ direction must be long/short";
+            const risk$ = acct*(risk/100), dist = Math.abs(entry-stop);
+            const shares = Math.floor(risk$/dist);
+            const r1 = dir==="long"?entry+dist:entry-dist;
+            const r2 = dir==="long"?entry+dist*2:entry-dist*2;
+            const r3 = dir==="long"?entry+dist*3:entry-dist*3;
+            return `📐 **Position Calculator**\n\n📊 **Input**\n   Account: $${acct.toLocaleString()}\n   Risk: ${risk}% = $${risk$.toFixed(2)}\n   ${dir.toUpperCase()} | Entry: $${entry} | Stop: $${stop}\n   Distance: $${dist.toFixed(2)}\n\n📏 **Position**\n   Size: ${shares} shares\n   Notional: $${(shares*entry).toFixed(2)}\n   Risk: $${(shares*dist).toFixed(2)}\n\n🎯 **R:R Targets**\n   1R: $${r1.toFixed(2)} ($${(shares*dist).toFixed(2)})\n   2R: $${r2.toFixed(2)} ($${(shares*dist*2).toFixed(2)})\n   3R: $${r3.toFixed(2)} ($${(shares*dist*3).toFixed(2)})`;
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        //  4. SESSION TIMER
+        // ═══════════════════════════════════════════════════════════════
+
+        const SESSIONS = [
+            {name:"Sydney", open:21, close:6, emoji:"🇦🇺"},
+            {name:"Tokyo/Asia", open:23, close:8, emoji:"🇯🇵"},
+            {name:"London", open:7, close:16, emoji:"🇬🇧"},
+            {name:"New York", open:12, close:21, emoji:"🇺🇸"},
+        ];
+        const OVERLAPS = [
+            {name:"London + NY", start:12, end:16, emoji:"🌎"},
+            {name:"Asia + London", start:7, end:8, emoji:"🌏"},
+        ];
+
+        function handleSessions(p) {
+            const sub = p.subaction || "now";
+            if (sub === "schedule") {
+                let l = [`📅 **Session Schedule** (UTC)`];
+                SESSIONS.forEach(s => l.push(`\n${s.emoji} **${s.name}**\n   ${String(s.open).padStart(2,"0")}:00 → ${String(s.close).padStart(2,"0")}:00 UTC`));
+                l.push(`\n🔄 **Overlaps**`);
+                OVERLAPS.forEach(o => l.push(`\n${o.emoji} ${o.name}: ${String(o.start).padStart(2,"0")}:00 → ${String(o.end).padStart(2,"0")}:00 UTC`));
+                return l.join("\n");
+            }
+            const now = new Date(), utc = now.getUTCHours()+now.getUTCMinutes()/60;
+            let l = [`⏰ **Trading Sessions** — ${now.toLocaleTimeString()} local\n   UTC: ${String(now.getUTCHours()).padStart(2,"0")}:${String(now.getUTCMinutes()).padStart(2,"0")}Z\n`];
+            const active = SESSIONS.filter(s => s.open<=s.close ? utc>=s.open&&utc<s.close : utc>=s.open||utc<s.close);
+            if (active.length) {
+                l.push(`🟢 **Active**`);
+                active.forEach(s => {
+                    const rem = s.open<=s.close ? (s.close-utc).toFixed(1) : utc>=s.open ? ((24+s.close-utc)%24).toFixed(1) : (s.close-utc).toFixed(1);
+                    l.push(`   ${s.emoji} ${s.name} — ${rem}h left`);
+                });
+            } else l.push(`⚫ No sessions active`);
+            const ao = OVERLAPS.filter(o => o.start<=o.end ? utc>=o.start&&utc<o.end : utc>=o.start||utc<o.end);
+            if (ao.length) l.push(`\n🔄 **Overlaps**\n   ${ao.map(o=>o.emoji+" "+o.name).join("\n   ")}`);
+            const up = SESSIONS.filter(s => s.open>utc && (s.open<=s.close?s.open>utc:true)).sort((a,b)=>a.open-b.open);
+            if (up.length) l.push(`\n⏳ **Upcoming**\n   ${up.slice(0,2).map(s=>`${s.emoji} ${s.name} in ${(s.open-utc).toFixed(1)}h`).join("\n   ")}`);
+            return l.join("\n");
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        //  5. TRADE SCRATCHPAD
+        // ═══════════════════════════════════════════════════════════════
+
+        function getScratch() { try { return JSON.parse(localStorage.getItem(SCRATCH_KEY))||[]; } catch { return []; } }
+        function saveScratch(n) { localStorage.setItem(SCRATCH_KEY, JSON.stringify(n)); }
+
+        function handleScratchpad(p) {
+            const sub = p.subaction || "list";
+            if (sub === "save") {
+                if (!p.content) return "❌ content required";
+                const note = {id:Date.now().toString(36), timestamp:new Date().toISOString(), content:p.content.trim(), symbol:p.symbol?p.symbol.toUpperCase():null, tags:p.tags?p.tags.split(",").map(t=>t.trim()):[], confidence:p.confidence||null};
+                const n = getScratch(); n.push(note); saveScratch(n);
+                return `✅ **Note Saved**\n   "${note.content.slice(0,80)}${note.content.length>80?"...":""}"${note.symbol?`\n   Symbol: ${note.symbol}`:""}${note.tags.length?`\n   Tags: ${note.tags.join(", ")}`:""}${note.confidence?`\n   Confidence: ${note.confidence}/10`:""}\n   Total: ${n.length} notes`;
+            }
+            if (sub === "list") {
+                const n = getScratch();
+                if (!n.length) return "📭 No notes yet.";
+                const recent = n.slice(-(p.limit||10)).reverse();
+                let l = [`📝 **Trade Ideas** (${n.length})`];
+                recent.forEach((n,i) => l.push(`\n${i+1}. ${n.symbol?`**${n.symbol}** `:""}[${new Date(n.timestamp).toLocaleDateString()}]\n   ${n.content.slice(0,120)}${n.tags.length?`\n   🏷️ ${n.tags.join(", ")}`:""}${n.confidence?`\n   🔥 ${n.confidence}/10`:""}`));
+                return l.join("\n");
+            }
+            if (sub === "search") {
+                if (!p.query) return "❌ query required";
+                const n = getScratch(), q = p.query.toLowerCase();
+                const r = n.filter(x => x.content.toLowerCase().includes(q)||(x.symbol&&x.symbol.toLowerCase().includes(q))||x.tags.some(t=>t.toLowerCase().includes(q))).reverse();
+                if (!r.length) return `🔍 No results for "${p.query}"`;
+                let l = [`🔍 **Search** "${p.query}" (${r.length})`];
+                r.slice(0,10).forEach((x,i) => l.push(`\n${i+1}. ${x.symbol?`**${x.symbol}** `:""}[${new Date(x.timestamp).toLocaleDateString()}]\n   ${x.content.slice(0,100)}`));
+                return l.join("\n");
+            }
+            if (sub === "delete") {
+                if (!p.id) return "❌ id required";
+                const n = getScratch(), idx = n.findIndex(x=>x.id===p.id);
+                if (idx===-1) return "❌ Note not found";
+                n.splice(idx,1); saveScratch(n);
+                return "🗑️ Deleted";
+            }
+            return "❌ Unknown. Use: save, list, search, delete";
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        //  HELP
+        // ═══════════════════════════════════════════════════════════════
+
+        function formatHelp() {
+            return `📖 **MAAT Trader — All-in-One**
+
+**5 tools in 1 skill. All offline.**
+
+🔲 **FVG Scanner** — action: "fvg"
+   Pass candles array {high, low, open, close, time}
+   Detects FVGs, 50-yard line, sweeps, retests
+
+📋 **Trade Journal** — action: "journal"
+   subaction: "log" (symbol, direction, entry, exit, quantity, setup)
+   subaction: "list" | "stats" | "clear"
+
+📐 **Position Calc** — action: "position"
+   account, risk_pct, entry, stop, direction
+
+⏰ **Session Timer** — action: "sessions"
+   subaction: "now" | "schedule"
+
+📝 **Scratchpad** — action: "scratchpad"
+   subaction: "save" (content, symbol, tags, confidence)
+   subaction: "list" | "search" (query) | "delete" (id)
+
+**Examples:**
+"FVG scan these candles: [high:100.5, low:99.2]"
+"Log trade: ES=F long, entry 7448, exit 7500, qty 2, FVG sweep"
+"Position: $80k, 1% risk, long 7448, stop 7420"
+"What sessions are active?"
+"Save idea: ES=F bearish at 7450, confidence 7"`;
+        }
+    </script>
+</body>
+</html>

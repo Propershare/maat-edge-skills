@@ -199,6 +199,44 @@ def serve_skill_file(path):
     except Exception as e:
         return error_response(f"Error reading file: {e}", 500)
 
+# ── Membership API ───────────────────────────────────────────────────────
+
+# Invite codes (you generate these in the lab)
+INVITE_CODES = {
+    "MAAT001": {"member": "ps", "status": "active"},
+    "MAAT002": {"member": "alpha", "status": "active"},
+    "MAAT003": {"member": "beta", "status": "pending"},
+}
+
+def handle_verify(data):
+    """Verify an invite code."""
+    code = data.get("code", "").upper().strip()
+    if code in INVITE_CODES:
+        entry = INVITE_CODES[code]
+        if entry["status"] == "active":
+            return json_response({"valid": True, "member": entry["member"]})
+        else:
+            return json_response({"valid": False, "reason": "code_pending"})
+    return json_response({"valid": False, "reason": "invalid_code"})
+
+def handle_register(data):
+    """Register a device to a member."""
+    code = data.get("code", "").upper().strip()
+    device_id = data.get("device_id", "")
+    if code in INVITE_CODES and INVITE_CODES[code]["status"] == "active":
+        # In production, store in Postgres
+        return json_response({"registered": True, "member": INVITE_CODES[code]["member"]})
+    return json_response({"registered": False, "reason": "invalid_code"})
+
+def handle_generate(data):
+    """Generate a new invite code (admin only)."""
+    # In production, require admin auth
+    member = data.get("member", "unknown")
+    import uuid
+    code = f"MAAT{uuid.uuid4().hex[:4].upper()}"
+    INVITE_CODES[code] = {"member": member, "status": "active"}
+    return json_response({"code": code, "member": member})
+
 # ── Router ────────────────────────────────────────────────────────────────
 
 ROUTES = {
@@ -259,6 +297,12 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
                 status, headers, body = error_response("Missing 'q' or 'query' field")
             else:
                 status, headers, body = handle_search(query)
+        elif path == "/verify":
+            status, headers, body = handle_verify(data)
+        elif path == "/register":
+            status, headers, body = handle_register(data)
+        elif path == "/generate":
+            status, headers, body = handle_generate(data)
         else:
             status, headers, body = error_response(f"Not found: {path}", 404)
         
