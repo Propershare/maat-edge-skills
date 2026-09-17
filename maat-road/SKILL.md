@@ -11,8 +11,8 @@ Everything a driver needs on the road, voice-first and **offline**. No cloud, no
 
 Call the `run_js` tool using `index.html` and pass a JSON string in `data` with:
 
-### ⏱️ Hours of Service (`action: "hos"`)
-Property-carrying rules. Every call returns the live clock.
+### ⏱️ Hours of Service — the HOS calculator (`action: "hos"`)
+Property-carrying rules. Self-logged on the phone; it is not an ELD. Every call returns the live clock. HOS appears **only** here — no other action repeats it.
 - `subaction: "start"` — go on duty (starts the 14-hour window).
 - `subaction: "drive"` — start driving.
 - `subaction: "stop"` — on-duty not driving (fuel, scale, dock, 30-min break). Optional: `note`.
@@ -47,7 +47,7 @@ Property-carrying rules. Every call returns the live clock.
 - `subaction: "list"`, `subaction: "search"` with `query`.
 
 ### 📅 Day summary (`action: "day"`)
-One spoken rollup: today's drive/on-duty hours, miles and money, active loads, last parking, open issues.
+Road ledger only: loads delivered today, what's on the board, fuel, expenses, total out, where you parked. **No HOS** — hours of service live only in the `hos` calculator.
 
 ### 📊 Trading (`action: "trading"`)
 Best-effort pull of the lab shortlist + journal. Degrades to "offline" when there is no signal — never blocks.

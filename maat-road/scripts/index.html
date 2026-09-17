@@ -517,45 +517,45 @@
 
         // ── Day summary ─────────────────────────────────────────────────
 
+        // Day summary is logistics + money only. HOS lives in the HOS
+        // calculator ("hos" action) and nowhere else.
         function daySummary() {
             const now = Date.now();
             const today = dayKey(now);
-            const evs = readStore(HOS_KEY).sort((a, b) => a.t - b.t);
-            const segs = buildSegments(evs, now).filter(s => dayKey(s.start) === today || dayKey(s.end) === today);
-            const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
-            const cut = dayStart.getTime();
-
-            let driveMs = 0, workMs = 0;
-            buildSegments(evs, now).forEach(s => {
-                const st = Math.max(s.start, cut);
-                if (s.end <= st) return;
-                const len = s.end - st;
-                if (s.type === "drive") driveMs += len;
-                if (isWork(s.type)) workMs += len;
-            });
-
             const fuelToday = readStore(FUEL_KEY).filter(r => dayKey(r.d) === today);
             const expToday = readStore(EXP_KEY).filter(r => dayKey(r.d) === today);
             const loads = readStore(LOAD_KEY);
             const active = loads.filter(l => l.status === "active");
+            const doneToday = loads.filter(l => l.status === "delivered" && l.delivered_at && dayKey(l.delivered_at) === today);
             const parked = readStore(PARK_KEY).slice(-1)[0];
 
             const out = [
-                `📅 ${new Date().toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" })}`,
-                `Drove ${fmtDur(driveMs)} · on-duty ${fmtDur(workMs)}`
+                `📅 ${new Date().toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" })} — road ledger`
             ];
+
+            if (doneToday.length) {
+                const mi = doneToday.reduce((a, l) => a + (Number(l.miles) || 0), 0);
+                const rev = doneToday.reduce((a, l) => a + (Number(l.rate) || 0), 0);
+                out.push(`Delivered: ${doneToday.length} load${doneToday.length > 1 ? "s" : ""} · ${mi.toLocaleString()} mi · ${money(rev)}${mi > 0 ? ` · ${money(rev / mi)}/mi` : ""}`);
+            } else {
+                out.push(`Delivered: none today`);
+            }
+
+            out.push(active.length
+                ? `On board: ${active.map(l => `${l.load_no} (${l.pickup || "?"} → ${l.delivery || "?"})`).join(", ")}`
+                : `On board: nothing active`);
 
             const gal = fuelToday.reduce((a, r) => a + (r.gallons || 0), 0);
             const fTot = fuelToday.reduce((a, r) => a + (r.total || 0), 0);
+            if (gal > 0 || fTot > 0) out.push(`Fuel: ${gal.toFixed(1)} gal · ${money(fTot)}${gal > 0 ? ` · ${money(fTot / gal)}/gal` : ""}`);
+
             const eTot = expToday.reduce((a, r) => a + (r.amount || 0), 0);
-            if (gal > 0 || fTot > 0) out.push(`Fuel: ${gal.toFixed(1)} gal · ${money(fTot)}`);
             if (eTot > 0) out.push(`Expenses: ${money(eTot)}`);
 
-            out.push(active.length ? `Loads: ${active.map(l => `${l.load_no} (${l.pickup || "?"} → ${l.delivery || "?"})`).join(", ")}` : "Loads: none active");
-            if (parked && dayKey(parked.d) === today) out.push(`Parked: ${parked.location}`);
+            const spend = fTot + eTot;
+            if (spend > 0) out.push(`Out today: ${money(spend)}`);
 
-            out.push("");
-            out.push(hosStatus());
+            if (parked && dayKey(parked.d) === today) out.push(`Parked: ${parked.location}`);
             return out.join("\n");
         }
 
