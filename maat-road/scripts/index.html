@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MAAT Road Skill</title>
+</head>
+<body>
+    <script>
+        // ── Storage keys ────────────────────────────────────────────────
+        const HOS_KEY   = "maat_road_hos";
+        const LOAD_KEY  = "maat_road_loads";
+        const FUEL_KEY  = "maat_road_fuel";
+        const PARK_KEY  = "maat_road_parking";
+        const EXP_KEY   = "maat_road_expenses";
+        const NOTE_KEY  = "maat_road_notes";
+
+        // ── HOS constants (FMCSA property-carrying, no adverse conditions) ──
+        const M = 60000, HH = 3600000;
+        const DRIVE_LIMIT  = 11 * HH;   // 11-hour driving limit
+        const WINDOW_LIMIT = 14 * HH;   // 14-hour on-duty window
+        const BREAK_AFTER  = 8 * HH;    // 30-min break after 8 cumulative driving hours
+        const BREAK_MIN    = 30 * M;    // qualifying interruption
+        const RESET        = 10 * HH;   // 10 consecutive hours off duty resets 11 & 14
+        const CYCLE_LIMIT  = 70 * HH;   // 70 hours / 8 days
+        const CYCLE_DAYS   = 8;
+
+        window['ai_edge_gallery_get_result'] = async (data) => {
+            try {
+                const params = JSON.parse(data);
+                const action = params.action || "help";
+
+                switch (action) {
+                    // ── Hours of Service ──
+                    case "hos":        return JSON.stringify({ result: handleHos(params) });
+
+                    // ── Road records ──
+                    case "load":       return JSON.stringify({ result: handleLoad(params) });
+                    case "fuel":       return JSON.stringify({ result: handleFuel(params) });
+                    case "parking":    return JSON.stringify({ result: handleParking(params) });
+                    case "expense":    return JSON.stringify({ result: handleExpense(params) });
+                    case "note":       return JSON.stringify({ result: handleNote(params) });
+                    case "day":        return JSON.stringify({ result: daySummary() });
+
+                    // ── Trading (best effort, offline-safe) ──
+                    case "trading":    return JSON.stringify({ result: await tradingRead() });
+
+                    default:           return JSON.stringify({ result: formatHelp() });
+                }
+            } catch (e) {
+                console.error("MAAT Road error:", e);
+                return JSON.stringify({ error: `Failed: ${e.message}` });
+            }
+        };
+
+        // ── Storage ─────────────────────────────────────────────────────
+
+        function readStore(key) {
+            try {
+                const v = JSON.parse(localStorage.getItem(key));
+                return Array.isArray(v) ? v : [];
+            } catch { return []; }
+        }
+
+        function writeStore(key, val) {
+            localStorage.setItem(key, JSON.stringify(val));
+        }
+
+        // ── Time helpers ────────────────────────────────────────────────
+
+        function fmtDur(ms) {
+            if (ms === null || ms === undefined || isNaN(ms)) return "—";
+            const neg = ms < 0;
+            let s = Math.abs(Math.round(ms / M));
+            const h = Math.floor(s / 60), m = s % 60;
+            const out = h > 0 ? `${h}h ${String(m).padStart(2, "0")}m` : `${m}m`;
+            return neg ? `-${out}` : out;
+        }
+
+        function fmtClock(ts) {
+            const d = new Date(ts);
+            return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        }
+
+        function fmtDay(ts) {
+            const d = new Date(ts);
+            return d.toLocaleDateString([], { month: "short", day: "numeric" });
+        }
+
+        function dayKey(ts) {
+            const d = new Date(ts);
+            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+        }
+
+        function money(n) {
+            const v = Number(n) || 0;
+            return `$${v.toLocaleString([], { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+        }
+
+        function escalate(msg) {
+            return `⚠️ ${msg}`;
+        }
+
+        // ── Hours of Service ────────────────────────────────────────────
+
+        const LABELS = {
+            on: "on duty", drive: "driving", stop: "on duty (not driving)",
+            sleeper: "sleeper berth", off: "off duty"
+        };
+
+        const isWork = (t) => t === "on" || t === "drive" || t === "stop";
+        const isRest = (t) => t === "off" || t === "sleeper";
+
+        function handleHos(params) {
+            const sub = (params.subaction || "status").toLowerCase();
+
+            switch (sub) {
+                case "start":   return pushEvent("on", params.note);
+                case "on":      return pushEvent("on", params.note);
+                case "drive":   return pushEvent("drive", params.note);
+                case "stop":    return pushEvent("stop", params.note);
+                case "sleeper": return pushEvent("sleeper", params.note);
+                case "off":     return pushEvent("off", params.note);
+                case "status":  return hosStatus();
+                case "log":     return hosLog(params.limit || 12);
+                case "undo":    return hosUndo(params.confirm === true);
+                default:
+                    return escalate(`Unknown hos subaction "${sub}". Use start / drive / stop / sleeper / off / status / log / undo.`);
+            }
+        }
+
+        function pushEvent(type, note) {
+            const evs = readStore(HOS_KEY)
+                .filter(e => typeof e.t === "number" && LABELS[e.type])
+                .sort((a, b) => a.t - b.t);
+
+            const last = evs[evs.length - 1];
+            if (last && last.type === type) {
+                return `Already ${LABELS[type]} since ${fmtClock(last.t)} — nothing logged.\n\n${hosStatus()}`;
+            }
+
+            evs.push({ t: Date.now(), type: type, note: note || null });
+            writeStore(HOS_KEY, evs);
+
+            const head = `✅ ${LABELS[type].toUpperCase()} logged at ${fmtClock(Date.now())}.`;
+            return `${head}\n\n${hosStatus()}`;
+        }
+
+        function hosUndo(confirm) {
+            if (!confirm) return escalate("To undo the last HOS entry, call again with confirm: true");
+            const evs = readStore(HOS_KEY).sort((a, b) => a.t - b.t);
+            if (!evs.length) return escalate("No HOS entries to undo.");
+            const gone = evs.pop();
+            writeStore(HOS_KEY, evs);
+            return `🗑️ Removed: ${LABELS[gone.type]} at ${fmtClock(gone.t)}.\n\n${hosStatus()}`;
+        }
+
+        function buildSegments(evs, now) {
+            const segs = [];
+            for (let i = 0; i < evs.length; i++) {
+                const start = evs[i].t;
+                const isLast = (i === evs.length - 1);
+                let end = isLast ? now : evs[i + 1].t;
+                if (end < start) end = start;
+                // Keep the open segment even at zero length so the current
+                // state reads correctly the instant an event is logged.
+                if (end === start && !isLast) continue;
+                segs.push({ type: evs[i].type, start: start, end: end, note: evs[i].note, open: isLast });
+            }
+            return segs;
+        }
+
+        // Start of the current 14-hour window = first working segment after the
+        // last contiguous non-working run of >= 10 hours. null = clock is clear.
+        function findWindowStart(segs) {
+            let lastQualifyingEndIdx = -1;
+            for (let j = 0; j < segs.length; j++) {
+                if (isRest(segs[j].type)) {
+                    let k = j;
+                    while (k + 1 < segs.length && isRest(segs[k + 1].type)) k++;
+                    if (segs[k].end - segs[j].start >= RESET) lastQualifyingEndIdx = k;
+                    j = k;
+                }
+            }
+            if (lastQualifyingEndIdx < 0) return segs.length ? segs[0].start : null;
+            if (lastQualifyingEndIdx + 1 >= segs.length) return null;
+            return segs[lastQualifyingEndIdx + 1].start;
+        }
+
+        function hosStatus() {
+            const now = Date.now();
+            const evs = readStore(HOS_KEY)
+                .filter(e => typeof e.t === "number" && LABELS[e.type])
+                .sort((a, b) => a.t - b.t);
+
+            if (!evs.length) {
+                return "⏱️ HOS — no shift logged.\nSay \"start on duty\" to open the 14-hour window.";
+            }
+
+            const segs = buildSegments(evs, now);
+            if (!segs.length) return "⏱️ HOS — no usable entries.";
+
+            const cur = segs[segs.length - 1];
+            const windowStart = findWindowStart(segs);
+
+            // Cycle: on-duty hours over the trailing 8 days.
+            const cycleCut = now - CYCLE_DAYS * 24 * HH;
+            let cycleMs = 0;
+            segs.forEach(s => {
+                if (!isWork(s.type)) return;
+                const st = Math.max(s.start, cycleCut);
+                if (s.end > st) cycleMs += s.end - st;
+            });
+            const cycleLeft = CYCLE_LIMIT - cycleMs;
+
+            if (windowStart === null) {
+                return [
+                    `⏱️ HOS — ${LABELS[cur.type].toUpperCase()} since ${fmtClock(cur.start)} (${fmtDur(now - cur.start)})`,
+                    `Clock is clear — 11h and 14h reset.`,
+                    `Cycle: ${fmtDur(cycleMs)} of 70h / 8 days (${fmtDur(cycleLeft)} left).`
+                ].join("\n");
+            }
+
+            let driveMs = 0;
+            segs.forEach(s => {
+                if (s.type === "drive" && s.start >= windowStart) driveMs += s.end - s.start;
+            });
+
+            const windowElapsed = now - windowStart;
+            const driveLeft = DRIVE_LIMIT - driveMs;
+            const windowLeft = WINDOW_LIMIT - windowElapsed;
+
+            // 30-minute break: cumulative driving since the last non-driving gap >= 30m.
+            let sinceBreak = 0;
+            for (let i = segs.length - 1; i >= 0; i--) {
+                const s = segs[i];
+                if (s.start < windowStart) break;
+                if (s.type === "drive") sinceBreak += s.end - s.start;
+                else if (s.end - s.start >= BREAK_MIN) break;
+            }
+            const breakLeft = BREAK_AFTER - sinceBreak;
+
+            const remaining = (ms) => ms > 0 ? fmtDur(ms) : `0h 00m (${fmtDur(-ms)} over)`;
+            const driveEndsIn = Math.min(driveLeft, windowLeft);
+            const curLen = now - cur.start;
+            const inBreak = cur.type !== "drive" && curLen >= BREAK_MIN;
+
+            let breakLine;
+            if (inBreak) breakLine = `Break:       taken ✅ (${fmtDur(curLen)}, 8h clock reset)`;
+            else if (breakLeft > 0) breakLine = `Break due:   ${fmtDur(breakLeft)}`;
+            else breakLine = `Break:       OVERDUE by ${fmtDur(-breakLeft)} — 30 min required`;
+
+            const lines = [
+                `⏱️ HOS — ${LABELS[cur.type].toUpperCase()} since ${fmtClock(cur.start)} (${fmtDur(curLen)})`,
+                `Drive left:  ${remaining(driveLeft)} of 11h`,
+                `Window left: ${remaining(windowLeft)} of 14h`,
+                breakLine,
+                `Cycle:       ${fmtDur(cycleMs)} of 70h / 8d (${fmtDur(cycleLeft)} left)`
+            ];
+
+            if (driveLeft <= 0 || windowLeft <= 0) {
+                lines.push(`🛑 DRIVING CLOCK EXPIRED — must stop now.`);
+            } else {
+                lines.push(`Drive ends:  ${fmtClock(now + driveEndsIn)} · Window ends: ${fmtClock(windowStart + WINDOW_LIMIT)}`);
+            }
+            if (breakLeft <= 0 && !inBreak) lines.push(`🛑 8-hour break overdue — stop 30 min now.`);
+            return lines.join("\n");
+        }
+
+        function hosLog(limit) {
+            const evs = readStore(HOS_KEY).sort((a, b) => a.t - b.t);
+            if (!evs.length) return "No HOS entries yet.";
+            const out = [`🕘 Duty log (last ${Math.min(limit, evs.length)})`];
+            let prevT = null, prevType = null;
+            evs.slice(-limit).forEach(e => {
+                const gap = prevT !== null ? ` [${fmtDur(e.t - prevT)} as ${LABELS[prevType]}]` : "";
+                out.push(`${fmtDay(e.t)} ${fmtClock(e.t)} — ${LABELS[e.type]}${e.note ? ` · ${e.note}` : ""}${gap}`);
+                prevT = e.t; prevType = e.type;
+            });
+            return out.join("\n");
+        }
+
+        // ── Loads ───────────────────────────────────────────────────────
+
+        function handleLoad(params) {
+            const sub = (params.subaction || "list").toLowerCase();
+            const loads = readStore(LOAD_KEY);
+
+            if (sub === "add") {
+                if (!params.load_no) return escalate("Need a load number to log it.");
+                const rec = {
+                    d: Date.now(),
+                    load_no: String(params.load_no),
+                    broker: params.broker || null,
+                    pickup: params.pickup || null,
+                    delivery: params.delivery || null,
+                    miles: params.miles !== undefined ? Number(params.miles) : null,
+                    deadhead: params.deadhead !== undefined ? Number(params.deadhead) : null,
+                    rate: params.rate !== undefined ? Number(params.rate) : null,
+                    notes: params.notes || null,
+                    status: "active",
+                    delivered_at: null
+                };
+                loads.push(rec);
+                writeStore(LOAD_KEY, loads);
+
+                const bits = [`✅ Load ${rec.load_no} logged`];
+                if (rec.pickup || rec.delivery) bits.push(`   ${rec.pickup || "?"} → ${rec.delivery || "?"}`);
+                if (rec.miles) bits.push(`   ${rec.miles} mi${rec.deadhead ? ` + ${rec.deadhead} dh` : ""}`);
+                if (rec.rate && rec.miles) bits.push(`   ${money(rec.rate)} = ${money(rec.rate / rec.miles)}/mi`);
+                else if (rec.rate) bits.push(`   ${money(rec.rate)}`);
+                return bits.join("\n");
+            }
+
+            if (sub === "close") {
+                if (!params.load_no) return escalate("Which load number is delivered?");
+                const idx = loads.map(l => l.load_no).lastIndexOf(String(params.load_no));
+                if (idx < 0) return escalate(`No load ${params.load_no} on the board.`);
+                loads[idx].status = "delivered";
+                loads[idx].delivered_at = Date.now();
+                if (params.miles !== undefined) loads[idx].miles = Number(params.miles);
+                if (params.rate !== undefined) loads[idx].rate = Number(params.rate);
+                writeStore(LOAD_KEY, loads);
+                const l = loads[idx];
+                const rpm = (l.rate && l.miles) ? ` · ${money(l.rate / l.miles)}/mi` : "";
+                return `✅ Load ${l.load_no} delivered${l.miles ? ` — ${l.miles} mi` : ""}${l.rate ? ` · ${money(l.rate)}` : ""}${rpm}`;
+            }
+
+            if (sub === "stats") {
+                const done = loads.filter(l => l.status === "delivered");
+                if (!loads.length) return "No loads logged yet.";
+                const miles = done.reduce((a, l) => a + (Number(l.miles) || 0), 0);
+                const rev = done.reduce((a, l) => a + (Number(l.rate) || 0), 0);
+                const out = [
+                    `🚛 Loads — ${loads.length} total, ${done.length} delivered`,
+                    `Miles:    ${miles.toLocaleString()}`,
+                    `Revenue:  ${money(rev)}`
+                ];
+                if (miles > 0) out.push(`Rate:     ${money(rev / miles)}/mi`);
+                const active = loads.filter(l => l.status === "active");
+                if (active.length) out.push(`Active:   ${active.map(l => l.load_no).join(", ")}`);
+                return out.join("\n");
+            }
+
+            // list
+            const active = loads.filter(l => l.status === "active");
+            if (!active.length) return loads.length ? "No active loads. All delivered." : "No loads logged yet.";
+            const out = [`🚛 Active loads (${active.length})`];
+            active.forEach(l => {
+                out.push(`${l.load_no}: ${l.pickup || "?"} → ${l.delivery || "?"}${l.miles ? ` · ${l.miles} mi` : ""}${l.rate ? ` · ${money(l.rate)}` : ""}`);
+            });
+            return out.join("\n");
+        }
+
+        // ── Fuel ────────────────────────────────────────────────────────
+
+        function handleFuel(params) {
+            const sub = (params.subaction || "stats").toLowerCase();
+            const rows = readStore(FUEL_KEY);
+
+            if (sub === "add") {
+                const gal = Number(params.gallons);
+                const price = Number(params.price);
+                if (!gal || gal <= 0) return escalate("How many gallons?");
+                let total = params.total !== undefined ? Number(params.total) : null;
+                if (!total && price > 0) total = gal * price;
+                const rec = {
+                    d: Date.now(), gallons: gal,
+                    price: price > 0 ? price : null,
+                    total: total,
+                    location: params.location || null,
+                    state: params.state || null,
+                    odometer: params.odometer !== undefined ? Number(params.odometer) : null
+                };
+                rows.push(rec);
+                writeStore(FUEL_KEY, rows);
+                const bits = [`⛽ ${gal} gal${rec.location ? ` at ${rec.location}` : ""}${total ? ` — ${money(total)}` : ""}`];
+                if (rec.price) bits.push(`   ${money(rec.price)}/gal`);
+                const store = readStore(FUEL_KEY);
+                const month = store.filter(r => r.d > Date.now() - 30 * 24 * HH);
+                const mGal = month.reduce((a, r) => a + (r.gallons || 0), 0);
+                const mTot = month.reduce((a, r) => a + (r.total || 0), 0);
+                if (mGal > 0) bits.push(`   30-day: ${mGal.toFixed(1)} gal · ${money(mTot)} · ${money(mTot / mGal)}/gal`);
+                return bits.join("\n");
+            }
+
+            if (!rows.length) return "No fuel logged yet.";
+            const gal = rows.reduce((a, r) => a + (r.gallons || 0), 0);
+            const tot = rows.reduce((a, r) => a + (r.total || 0), 0);
+            const d30 = rows.filter(r => r.d > Date.now() - 30 * 24 * HH);
+            const g30 = d30.reduce((a, r) => a + (r.gallons || 0), 0);
+            const t30 = d30.reduce((a, r) => a + (r.total || 0), 0);
+            const out = [
+                `⛽ Fuel — ${rows.length} fills`,
+                `All time: ${gal.toFixed(1)} gal · ${money(tot)}${gal > 0 ? ` · ${money(tot / gal)}/gal` : ""}`,
+                `Last 30d: ${g30.toFixed(1)} gal · ${money(t30)}${g30 > 0 ? ` · ${money(t30 / g30)}/gal` : ""}`,
+                `Last fill: ${fmtDay(rows[rows.length - 1].d)}${rows[rows.length - 1].location ? ` at ${rows[rows.length - 1].location}` : ""}`
+            ];
+            return out.join("\n");
+        }
+
+        // ── Parking ─────────────────────────────────────────────────────
+
+        function handleParking(params) {
+            const sub = (params.subaction || "list").toLowerCase();
+            const rows = readStore(PARK_KEY);
+
+            if (sub === "add") {
+                if (!params.location) return escalate("Where did you park?");
+                const rec = {
+                    d: Date.now(),
+                    location: String(params.location),
+                    spaces_free: params.spaces_free !== undefined ? Number(params.spaces_free) : null,
+                    safe: params.safe === undefined ? null : (String(params.safe).toLowerCase().startsWith("y") || params.safe === true),
+                    showers: params.showers === undefined ? null : (String(params.showers).toLowerCase().startsWith("y") || params.showers === true),
+                    note: params.note || null
+                };
+                rows.push(rec);
+                writeStore(PARK_KEY, rows);
+                const flags = [rec.safe === true ? "safe" : rec.safe === false ? "⚠️ sketchy" : null,
+                               rec.showers === true ? "showers" : null,
+                               rec.spaces_free !== null ? `${rec.spaces_free} spaces` : null].filter(Boolean);
+                return `🅿️ Logged: ${rec.location}${flags.length ? ` — ${flags.join(", ")}` : ""}`;
+            }
+
+            if (sub === "search") {
+                const q = String(params.query || "").toLowerCase();
+                if (!q) return escalate("Search for what?");
+                const hits = rows.filter(r => JSON.stringify(r).toLowerCase().includes(q));
+                if (!hits.length) return `No parking notes matching "${params.query}".`;
+                return [`🅿️ Matches for "${params.query}" (${hits.length})`].concat(
+                    hits.slice(-10).reverse().map(r => `${fmtDay(r.d)} ${r.location}${r.note ? ` — ${r.note}` : ""}`)
+                ).join("\n");
+            }
+
+            if (!rows.length) return "No parking logged yet.";
+            return [`🅿️ Recent stops (${rows.length} total)`].concat(
+                rows.slice(-8).reverse().map(r => {
+                    const f = [r.safe === true ? "safe" : r.safe === false ? "⚠️sketchy" : null,
+                               r.showers === true ? "showers" : null].filter(Boolean).join(", ");
+                    return `${fmtDay(r.d)} ${r.location}${f ? ` — ${f}` : ""}${r.note ? ` · ${r.note}` : ""}`;
+                })
+            ).join("\n");
+        }
+
+        // ── Expenses ────────────────────────────────────────────────────
+
+        function handleExpense(params) {
+            const sub = (params.subaction || "stats").toLowerCase();
+            const rows = readStore(EXP_KEY);
+
+            if (sub === "add") {
+                const amt = Number(params.amount);
+                if (!amt) return escalate("How much was it?");
+                const cat = (params.category || "other").toLowerCase();
+                rows.push({ d: Date.now(), amount: amt, category: cat, note: params.note || null });
+                writeStore(EXP_KEY, rows);
+                const today = rows.filter(r => dayKey(r.d) === dayKey(Date.now()));
+                const tSum = today.reduce((a, r) => a + r.amount, 0);
+                return `💵 ${money(amt)} ${cat} logged${params.note ? ` (${params.note})` : ""}. Today: ${money(tSum)}.`;
+            }
+
+            if (sub === "list") {
+                if (!rows.length) return "No expenses logged yet.";
+                const n = params.limit || 10;
+                return [`💵 Expenses (last ${Math.min(n, rows.length)})`].concat(
+                    rows.slice(-n).reverse().map(r => `${fmtDay(r.d)} ${money(r.amount)} ${r.category}${r.note ? ` · ${r.note}` : ""}`)
+                ).join("\n");
+            }
+
+            if (!rows.length) return "No expenses logged yet.";
+            const byCat = {};
+            rows.forEach(r => { byCat[r.category] = (byCat[r.category] || 0) + r.amount; });
+            const today = rows.filter(r => dayKey(r.d) === dayKey(Date.now()));
+            const all = rows.reduce((a, r) => a + r.amount, 0);
+            const out = [
+                `💵 Expenses — ${money(all)} all time · ${money(today.reduce((a, r) => a + r.amount, 0))} today`
+            ];
+            Object.entries(byCat).sort((a, b) => b[1] - a[1]).forEach(([k, v]) => out.push(`   ${k}: ${money(v)}`));
+            return out.join("\n");
+        }
+
+        // ── Notes ───────────────────────────────────────────────────────
+
+        function handleNote(params) {
+            const sub = (params.subaction || "add").toLowerCase();
+            const rows = readStore(NOTE_KEY);
+
+            if (sub === "add") {
+                if (!params.content) return escalate("Nothing to save — say the note.");
+                const rec = {
+                    d: Date.now(),
+                    title: params.title || null,
+                    content: String(params.content),
+                    tags: params.tags || null
+                };
+                rows.push(rec);
+                writeStore(NOTE_KEY, rows);
+                return `📝 Saved${rec.title ? ` "${rec.title}"` : ""} (${rows.length} notes).`;
+            }
+
+            if (sub === "search") {
+                const q = String(params.query || "").toLowerCase();
+                if (!q) return escalate("Search for what?");
+                const hits = rows.filter(r => JSON.stringify(r).toLowerCase().includes(q));
+                if (!hits.length) return `No notes matching "${params.query}".`;
+                return [`📝 Matches for "${params.query}" (${hits.length})`].concat(
+                    hits.slice(-10).reverse().map(r => `${fmtDay(r.d)}${r.title ? ` ${r.title}:` : ""} ${r.content}`)
+                ).join("\n");
+            }
+
+            if (!rows.length) return "No notes saved yet.";
+            return [`📝 Recent notes (${rows.length} total)`].concat(
+                rows.slice(-8).reverse().map(r => `${fmtDay(r.d)}${r.title ? ` ${r.title}:` : ""} ${String(r.content).slice(0, 140)}`)
+            ).join("\n");
+        }
+
+        // ── Day summary ─────────────────────────────────────────────────
+
+        function daySummary() {
+            const now = Date.now();
+            const today = dayKey(now);
+            const evs = readStore(HOS_KEY).sort((a, b) => a.t - b.t);
+            const segs = buildSegments(evs, now).filter(s => dayKey(s.start) === today || dayKey(s.end) === today);
+            const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
+            const cut = dayStart.getTime();
+
+            let driveMs = 0, workMs = 0;
+            buildSegments(evs, now).forEach(s => {
+                const st = Math.max(s.start, cut);
+                if (s.end <= st) return;
+                const len = s.end - st;
+                if (s.type === "drive") driveMs += len;
+                if (isWork(s.type)) workMs += len;
+            });
+
+            const fuelToday = readStore(FUEL_KEY).filter(r => dayKey(r.d) === today);
+            const expToday = readStore(EXP_KEY).filter(r => dayKey(r.d) === today);
+            const loads = readStore(LOAD_KEY);
+            const active = loads.filter(l => l.status === "active");
+            const parked = readStore(PARK_KEY).slice(-1)[0];
+
+            const out = [
+                `📅 ${new Date().toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" })}`,
+                `Drove ${fmtDur(driveMs)} · on-duty ${fmtDur(workMs)}`
+            ];
+
+            const gal = fuelToday.reduce((a, r) => a + (r.gallons || 0), 0);
+            const fTot = fuelToday.reduce((a, r) => a + (r.total || 0), 0);
+            const eTot = expToday.reduce((a, r) => a + (r.amount || 0), 0);
+            if (gal > 0 || fTot > 0) out.push(`Fuel: ${gal.toFixed(1)} gal · ${money(fTot)}`);
+            if (eTot > 0) out.push(`Expenses: ${money(eTot)}`);
+
+            out.push(active.length ? `Loads: ${active.map(l => `${l.load_no} (${l.pickup || "?"} → ${l.delivery || "?"})`).join(", ")}` : "Loads: none active");
+            if (parked && dayKey(parked.d) === today) out.push(`Parked: ${parked.location}`);
+
+            out.push("");
+            out.push(hosStatus());
+            return out.join("\n");
+        }
+
+        // ── Trading (offline-safe) ──────────────────────────────────────
+
+        async function tradingRead() {
+            const base = window.location.origin;
+            const TOKEN = localStorage.getItem("maat_bridge_token") || "";
+            const headers = TOKEN ? { "Authorization": `Bearer ${TOKEN}` } : {};
+            const grab = async (path) => {
+                const res = await fetch(`${base}${path}`, { headers: headers });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                return res.json();
+            };
+            try {
+                const s = await grab("/shortlist");
+                const cands = s.candidates || s.data || [];
+                const out = ["📊 Shortlist (lab)"];
+                if (!cands.length) out.push("   No candidates in the last scan.");
+                cands.slice(0, 5).forEach(c => out.push(`   ${c.symbol || c.ticker || "?"} — ${c.bias || c.direction || "?"} ${c.score !== undefined ? `· ${c.score}` : ""}`));
+                return out.join("\n");
+            } catch (e) {
+                return `📊 Trading: offline or bridge unreachable (${e.message}). Data still saved locally.`;
+            }
+        }
+
+        // ── Help ────────────────────────────────────────────────────────
+
+        function formatHelp() {
+            return [
+                "🚛 MAAT Road — OTR copilot (works offline)",
+                "",
+                "HOS:      \"start on duty\" · \"driving\" · \"stopped\" · \"sleeper\" · \"off duty\" · \"what's my clock\" · \"duty log\"",
+                "Loads:    log a load, list loads, close a load, load stats",
+                "Fuel:     log fuel (gallons + price), fuel stats",
+                "Parking:  log where you parked, search parking",
+                "Expenses: lumper / scale / toll / repair / food",
+                "Notes:    save a note, search notes",
+                "Summary:  \"how's my day\"",
+                "Trading:  lab shortlist when you have signal"
+            ].join("\n");
+        }
+    </script>
+</body>
+</html>
